@@ -85,6 +85,7 @@ export function createBot(
     const sessionKey = getSessionKey(ctx);
     const sessionLabel = getSessionLabel(ctx);
 
+    return sessionManager.withLock(sessionKey, async () => {
     try {
       const page = await sessionManager.getOrCreate(provider.config, sessionKey, sessionLabel);
 
@@ -159,6 +160,7 @@ export function createBot(
         .editMessageText(ctx.chat!.id, sentMsg.message_id, userMessage)
         .catch(async () => ctx.reply(userMessage, replyExtra));
     }
+    }); // withLock
   }
 
   // ── Commands ───────────────────────────────────────────────

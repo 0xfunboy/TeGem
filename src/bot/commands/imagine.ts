@@ -26,6 +26,7 @@ export function makeImagineHandler(
     const sessionKey = getSessionKey(ctx);
     const sessionLabel = getSessionLabel(ctx);
 
+    return sessionManager.withLock(sessionKey, async () => {
     try {
       const page = await sessionManager.getOrCreate(provider.config, sessionKey, sessionLabel);
 
@@ -71,5 +72,6 @@ export function makeImagineHandler(
       const message = err instanceof Error ? err.message : String(err);
       await ctx.reply(`Errore: ${message}`);
     }
+    }); // withLock
   };
 }

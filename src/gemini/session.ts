@@ -19,6 +19,12 @@ export class GeminiSessionManager {
   private pages: Map<string, Page> = new Map();
   /** Persistent mapping: sessionKey → conversationId / URL. */
   private store: ConversationStore;
+  /**
+   * Per-session mutex: maps sessionKey → the tail of the promise chain.
+   * Guarantees that only one request runs at a time per session, preventing
+   * interleaved keyboard/DOM operations on the same page.
+   */
+  private locks: Map<string, Promise<void>> = new Map();
 
   constructor(private readonly config: GeminiConfig) {
     const storeDir = path.join(
@@ -60,6 +66,27 @@ export class GeminiSessionManager {
   /** Number of currently open session pages. */
   sessionCount(): number {
     return this.pages.size;
+  }
+
+  /**
+   * Acquires a per-session lock and runs `fn`. If another call is already
+   * running for the same sessionKey, this call waits in a queue.
+   * Ensures serial execution per Gemini tab regardless of async concurrency.
+   */
+  async withLock<T>(sessionKey: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(sessionKey) ?? Promise.resolve();
+    let releaseLock!: () => void;
+    const next = new Promise<void>((res) => { releaseLock = res; });
+    this.locks.set(sessionKey, prev.then(() => next));
+
+    await prev; // wait for any prior request on this session to finish
+    try {
+      return await fn();
+    } finally {
+      releaseLock();
+      // Clean up if no more waiters
+      if (this.locks.get(sessionKey) === next) this.locks.delete(sessionKey);
+    }
   }
 
   /** Returns the stored conversation info for a session key (if any). */
