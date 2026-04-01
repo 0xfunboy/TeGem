@@ -14,6 +14,12 @@ function readNumber(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function readIdList(name: string): number[] {
+  const value = process.env[name];
+  if (!value?.trim()) return [];
+  return value.split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n !== 0);
+}
+
 function resolveDefaultChromePath(): string | undefined {
   const candidates = ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
   return candidates.find((c) => existsSync(c));
@@ -36,6 +42,10 @@ export interface AppConfig {
   profileDir: string;
   /** System prompt injected into Gemini to give the bot its identity */
   systemPrompt: string;
+  /** Telegram user IDs allowed in private chat. Empty = allow all. */
+  allowedUsers: number[];
+  /** Telegram chat IDs of groups where the bot is allowed. Empty = allow all. */
+  allowedGroups: number[];
 }
 
 export function loadConfig(): AppConfig {
@@ -93,5 +103,7 @@ Rispondi sempre in modo naturale, utile e conciso. Se l'utente scrive in italian
     geminiProvider,
     profileDir: process.env.GEMINI_PROFILE_DIR ?? "_shared",
     systemPrompt,
+    allowedUsers: readIdList("ALLOWED_USERS"),
+    allowedGroups: readIdList("ALLOWED_GROUPS"),
   };
 }

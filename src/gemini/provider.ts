@@ -130,14 +130,17 @@ export class GeminiProvider {
   async *streamResponse(
     page: Page,
     baseline: ConversationSnapshot,
+    overrides: { maxDurationMs?: number; firstChunkTimeoutMs?: number } = {},
   ): AsyncGenerator<string, GeminiResponse> {
+    const maxDurationMs = overrides.maxDurationMs ?? this.geminiConfig.streamMaxDurationMs;
+    const firstChunkTimeoutMs = overrides.firstChunkTimeoutMs ?? this.geminiConfig.streamFirstChunkTimeoutMs;
     const startedAt = Date.now();
     let previous = "";
     let stableTicks = 0;
     let firstUsefulSignalSeen = false;
 
     while (stableTicks < this.geminiConfig.streamStableTicks) {
-      if (Date.now() - startedAt > this.geminiConfig.streamMaxDurationMs) {
+      if (Date.now() - startedAt > maxDurationMs) {
         throw new GeminiTimeoutError("timeout massimo di risposta superato");
       }
 
@@ -165,7 +168,7 @@ export class GeminiProvider {
         stableTicks = (busy && !canSettleWhileBusy) || imageStillLoading ? 0 : stableTicks + 1;
       }
 
-      if (!firstUsefulSignalSeen && Date.now() - startedAt > this.geminiConfig.streamFirstChunkTimeoutMs) {
+      if (!firstUsefulSignalSeen && Date.now() - startedAt > firstChunkTimeoutMs) {
         throw new GeminiTimeoutError("nessuna risposta entro il timeout iniziale");
       }
 
