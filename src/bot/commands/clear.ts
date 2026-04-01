@@ -11,15 +11,22 @@ export function makeClearHandler(
 ) {
   return async (ctx: CommandContext<Context>): Promise<void> => {
     const page = sessionManager.getPage();
-    if (page) {
-      try {
-        await page.goto(provider.config.baseUrl, { waitUntil: "domcontentloaded" });
-        await ctx.reply("Conversazione cancellata. Inizia pure con un nuovo messaggio!", { parse_mode: "Markdown" });
-      } catch {
-        await ctx.reply("Non riesco a resettare la conversazione. Riprova tra poco.");
-      }
-    } else {
+    if (!page) {
       await ctx.reply("Nessuna sessione attiva. Scrivi qualcosa per iniziare!");
+      return;
+    }
+
+    try {
+      // Navigate to a fresh Gemini conversation
+      await page.goto(provider.config.baseUrl, { waitUntil: "domcontentloaded" });
+      await provider.ensureReady(page);
+
+      // Silently re-inject the system prompt so the new conversation has context
+      await provider.injectSystemPrompt(page, config.systemPrompt);
+
+      await ctx.reply("Conversazione resettata. Il contesto di TeGem è stato reinizializzato — puoi ricominciare!");
+    } catch {
+      await ctx.reply("Non riesco a resettare la conversazione. Riprova tra poco.");
     }
   };
 }

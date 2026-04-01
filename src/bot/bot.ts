@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 
 import type { AppConfig } from "../config.js";
 import { GeminiProvider } from "../gemini/provider.js";
@@ -10,7 +10,6 @@ import { handleHelp } from "./commands/help.js";
 import { makeClearHandler } from "./commands/clear.js";
 import { makeStatusHandler } from "./commands/status.js";
 import { makeImagineHandler } from "./commands/imagine.js";
-import { InputFile } from "grammy";
 
 export function createBot(
   config: AppConfig,
@@ -30,95 +29,75 @@ export function createBot(
   bot.on("message:text", async (ctx) => {
     const userText = ctx.message.text;
 
-    // Ignore commands that weren't matched above
     if (userText.startsWith("/")) {
-      await ctx.reply(
-        "Comando sconosciuto. Usa /help per vedere i comandi disponibili.",
-      );
+      await ctx.reply("Comando sconosciuto. Usa /help per vedere i comandi disponibili.");
       return;
     }
 
     const stopTyping = startTyping(ctx);
     const profilePath = sessionManager.resolveProfilePath(config.profileDir);
-
-    // Sent message placeholder for streaming edit
-    const sentMsg = await ctx.reply("Sto elaborando…");
+    const sentMsg = await ctx.reply("…");
 
     try {
-      // Ensure Gemini session is alive
       const session = await sessionManager.getOrCreate(provider.config, profilePath);
       const page = session.page;
 
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
 
-      const baseline = await provider.snapshotConversation(page);
+      // If the conversation is empty (fresh session or just cleared),
+      // inject the system prompt silently before the first real message.
+      let baseline = await provider.snapshotConversation(page);
+      if (baseline.count === 0) {
+        await provider.injectSystemPrompt(page, config.systemPrompt);
+        baseline = await provider.snapshotConversation(page);
+      }
+
       baseline.prompt = userText;
+      await provider.sendPrompt(page, userText);
 
-      // On first message per session, inject system prompt
-      const messageCount = baseline.count;
-      const finalPrompt =
-        messageCount === 0
-          ? `${config.systemPrompt}\n\n---\n\n${userText}`
-          : userText;
-
-      await provider.sendPrompt(page, finalPrompt);
-
-      // Stream response and accumulate
+      // Stream response, editing the placeholder at regular intervals
       let accumulated = "";
       let lastEdit = Date.now();
       const EDIT_INTERVAL_MS = 1_500;
 
-      const stream = provider.streamResponse(page, baseline);
-      let result = await stream.next();
+      const gen = provider.streamResponse(page, baseline);
+      let next = await gen.next();
 
-      while (!result.done) {
-        accumulated += result.value as string;
-
-        // Edit message at intervals to show streaming effect
+      while (!next.done) {
+        accumulated += next.value as string;
         if (Date.now() - lastEdit > EDIT_INTERVAL_MS && accumulated.trim()) {
           await ctx.api
             .editMessageText(ctx.chat.id, sentMsg.message_id, accumulated + " ▌")
             .catch(() => undefined);
           lastEdit = Date.now();
         }
-
-        result = await stream.next();
+        next = await gen.next();
       }
 
       stopTyping();
 
-      const finalResponse = result.value as { text: string; images: Array<{ src: string; alt?: string }> };
+      const finalResponse = next.value as { text: string; images: Array<{ src: string; alt?: string }> };
       const finalText = finalResponse.text || accumulated;
       const images = finalResponse.images ?? [];
 
-      // Check quota
-      if (provider.isQuotaExhausted(finalText)) {
-        throw new GeminiQuotaError(finalText);
-      }
+      if (provider.isQuotaExhausted(finalText)) throw new GeminiQuotaError(finalText);
 
-      // Update final text
+      // Send text (if any)
       if (finalText.trim()) {
         await ctx.api
           .editMessageText(ctx.chat.id, sentMsg.message_id, finalText)
-          .catch(async () => {
-            // If edit fails (message too long or identical), send new
-            await ctx.reply(finalText);
-          });
+          .catch(async () => ctx.reply(finalText));
       } else {
-        await ctx.api
-          .editMessageText(ctx.chat.id, sentMsg.message_id, "Risposta vuota da Gemini. Riprova.")
-          .catch(() => undefined);
+        // No text — delete the placeholder
+        await ctx.api.deleteMessage(ctx.chat.id, sentMsg.message_id).catch(() => undefined);
       }
 
-      // Send images if any
+      // Send images (if any)
       for (const img of images) {
         if (img.src.startsWith("data:")) {
-          const base64 = img.src.split(",")[1];
-          const buffer = Buffer.from(base64, "base64");
-          await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
-            caption: img.alt || undefined,
-          });
+          const buf = Buffer.from(img.src.split(",")[1], "base64");
+          await ctx.replyWithPhoto(new InputFile(buf, "image.png"), { caption: img.alt || undefined });
         } else {
           await ctx.replyWithPhoto(img.src, { caption: img.alt || undefined });
         }
@@ -126,14 +105,14 @@ export function createBot(
     } catch (err) {
       stopTyping();
       const message = err instanceof Error ? err.message : String(err);
-
       let userMessage: string;
+
       if (err instanceof GeminiQuotaError) {
         userMessage = "Quota Gemini esaurita per oggi. Riprova domani.";
       } else if (err instanceof GeminiTimeoutError) {
-        userMessage = `Timeout Gemini: ${message}`;
+        userMessage = `Timeout: ${message}`;
       } else if (message.includes("non pronto") || message.includes("login")) {
-        userMessage = "Gemini non è pronto. Potrebbe essere necessario effettuare il login. Usa /status per verificare.";
+        userMessage = "Gemini non è pronto. Usa /status per verificare.";
       } else {
         userMessage = `Errore: ${message}`;
       }
@@ -144,7 +123,6 @@ export function createBot(
     }
   });
 
-  // ── Error handler ──────────────────────────────────────────
   bot.catch((err) => {
     console.error("[TeGem] Errore non gestito:", err.message);
   });
