@@ -21,10 +21,7 @@ export function makeClearHandler(
       await page.goto(provider.config.baseUrl, { waitUntil: "domcontentloaded" });
       await provider.ensureReady(page);
 
-      // Silently re-inject the system prompt so the new conversation has context
-      await provider.injectSystemPrompt(page, config.systemPrompt);
-
-      await ctx.reply("Conversazione resettata. Il contesto di TeGem è stato reinizializzato — puoi ricominciare!");
+      await ctx.reply("Conversazione resettata. Puoi ricominciare!");
     } catch {
       await ctx.reply("Non riesco a resettare la conversazione. Riprova tra poco.");
     }

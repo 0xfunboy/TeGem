@@ -127,6 +127,7 @@ export class GeminiSessionManager {
       viewport: { width: 1440, height: 960 },
       locale: "en-US",
       colorScheme: "dark",
+      acceptDownloads: true,
       args: [
         "--window-size=1440,960",
         "--disable-blink-features=AutomationControlled",
