@@ -7,6 +7,7 @@ import { GeminiSessionManager } from "../gemini/session.js";
 import { GeminiQuotaError, GeminiTimeoutError } from "../gemini/errors.js";
 import { startTyping } from "./middleware/typing.js";
 import { createAuthMiddleware } from "./middleware/auth.js";
+import { getSessionKey } from "./sessionKey.js";
 import { handleStart } from "./commands/start.js";
 import { handleHelp } from "./commands/help.js";
 import { makeClearHandler } from "./commands/clear.js";
@@ -81,11 +82,10 @@ export function createBot(
     const replyExtra = replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
     const sentMsg = await ctx.reply("…", replyExtra);
 
-    const profilePath = sessionManager.resolveProfilePath(config.profileDir);
+    const sessionKey = getSessionKey(ctx);
 
     try {
-      const session = await sessionManager.getOrCreate(provider.config, profilePath);
-      const page = session.page;
+      const page = await sessionManager.getOrCreate(provider.config, sessionKey);
 
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
@@ -163,7 +163,7 @@ export function createBot(
   // ── Commands ───────────────────────────────────────────────
   bot.command("start", handleStart);
   bot.command("help", handleHelp);
-  bot.command("clear", makeClearHandler(sessionManager, provider, config));
+  bot.command("clear", makeClearHandler(sessionManager, provider));
   bot.command("status", makeStatusHandler(sessionManager));
   bot.command("imagine", makeImagineHandler(sessionManager, provider, config));
   bot.command("voice", makeVoiceHandler(sessionManager, provider));

@@ -12,23 +12,17 @@ async function main(): Promise<void> {
 
   console.log("[TeGem] Avvio bot Telegram...");
 
-  // Auto-login: if a persisted profile exists, open Gemini automatically
-  if (await sessionManager.hasPersistedProfile(config.profileDir)) {
-    console.log("[TeGem] Profilo Gemini trovato, avvio sessione...");
-    try {
-      await sessionManager.openForLogin(config.geminiProvider, config.profileDir);
-      const page = sessionManager.getPage();
-      if (page) {
-        await provider.ensureReady(page);
-        console.log("[TeGem] Sessione Gemini attiva.");
-      }
-    } catch (err) {
-      console.warn("[TeGem] Auto-login fallito:", err instanceof Error ? err.message : err);
-      console.warn("[TeGem] Il bot partirà comunque; la sessione verrà aperta al primo messaggio.");
-    }
-  } else {
-    console.log("[TeGem] Nessun profilo Gemini salvato. Al primo messaggio si aprirà il browser per il login.");
-    console.log("[TeGem] Profilo verrà salvato in:", sessionManager.resolveProfilePath(config.profileDir));
+  // Warm up the browser context and verify Gemini login
+  console.log("[TeGem] Avvio sessione browser...");
+  try {
+    const loginPage = await sessionManager.openForLogin(config.geminiProvider);
+    await provider.ensureReady(loginPage);
+    console.log("[TeGem] Sessione Gemini attiva.");
+    // Close the warmup page — real pages are created per user/group on demand
+    await loginPage.close();
+  } catch (err) {
+    console.warn("[TeGem] Avvio sessione fallito:", err instanceof Error ? err.message : err);
+    console.warn("[TeGem] Il bot partirà comunque; la sessione verrà aperta al primo messaggio.");
   }
 
   const bot = createBot(config, sessionManager, provider);
@@ -40,11 +34,12 @@ async function main(): Promise<void> {
     { command: "clear", description: "Nuova conversazione" },
     { command: "status", description: "Stato del bot" },
     { command: "imagine", description: "Genera un'immagine" },
+    { command: "q", description: "Fai una domanda (utile nei gruppi)" },
+    { command: "voice", description: "Leggi l'ultima risposta (audio)" },
   ]);
 
   console.log("[TeGem] Bot pronto. In ascolto...");
 
-  // Graceful shutdown
   const shutdown = async (): Promise<void> => {
     console.log("\n[TeGem] Spegnimento...");
     bot.stop();
