@@ -1,7 +1,15 @@
 import type { Locator, Page } from "playwright";
 
 import { GeminiQuotaError, GeminiTimeoutError } from "./errors.js";
-import type { ConversationSnapshot, GeminiConfig, GeminiProviderConfig, GeminiResponse, GeneratedImage } from "./types.js";
+import type {
+  ConversationSnapshot,
+  GeminiConfig,
+  GeminiProviderConfig,
+  GeminiResponse,
+  GeneratedImage,
+  GeneratedMedia,
+  GeneratedMusicDownloads,
+} from "./types.js";
 
 const QUOTA_PATTERNS = [
   /you('ve| have) (reached|exceeded|hit) (your |the )?(daily |usage |message |free )?limit/i,
@@ -761,12 +769,34 @@ export class GeminiProvider {
     await sleep(2_000);
   }
 
+  async downloadGeneratedMusic(page: Page, timeoutMs = 120_000): Promise<GeneratedMusicDownloads> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const video = await this.downloadLastResponseMenuMedia(page, {
+        icon: "movie",
+        label: "Video",
+        filenameFallback: "generated_music_video.mp4",
+      });
+      const audio = await this.downloadLastResponseMenuMedia(page, {
+        icon: "music_note",
+        label: "Audio only",
+        filenameFallback: "generated_music_audio.mp3",
+      });
+
+      if (video || audio) return { video, audio };
+      await sleep(2_000);
+    }
+
+    return { video: null, audio: null };
+  }
+
   /**
    * Waits for a generated media element (audio/video) to appear in the last
    * response, then intercepts the download or extracts the blob URL.
    * Works for Gemini's music and video generation features.
    */
-  async downloadGeneratedMedia(page: Page, timeoutMs = 120_000): Promise<import("./types.js").GeneratedMedia | null> {
+  async downloadGeneratedMedia(page: Page, timeoutMs = 120_000): Promise<GeneratedMedia | null> {
     const deadline = Date.now() + timeoutMs;
 
     // Poll for audio/video elements in the last response
@@ -835,6 +865,58 @@ export class GeminiProvider {
     return null;
   }
 
+  private async downloadLastResponseMenuMedia(
+    page: Page,
+    option: { icon: string; label: string; filenameFallback: string },
+  ): Promise<GeneratedMedia | null> {
+    const lastResponse = page.locator("response-container").last();
+    if (!(await lastResponse.isVisible().catch(() => false))) return null;
+
+    await lastResponse.scrollIntoViewIfNeeded().catch(() => undefined);
+    await lastResponse.hover({ force: true }).catch(() => undefined);
+    await sleep(400);
+
+    const downloadBtn = await this.findLastResponseDownloadButton(page, lastResponse);
+    if (!downloadBtn) return null;
+
+    await downloadBtn.click({ force: true }).catch(() => undefined);
+    await sleep(500);
+
+    const optionButton = this.findMenuOption(page, option.icon, option.label);
+    if (!(await optionButton.isVisible({ timeout: 3_000 }).catch(() => false))) {
+      await page.keyboard.press("Escape").catch(() => undefined);
+      return null;
+    }
+
+    const download = await this.triggerDownloadWithMeta(page, optionButton, option.filenameFallback);
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return download;
+  }
+
+  private async findLastResponseDownloadButton(page: Page, lastResponse: Locator): Promise<Locator | null> {
+    const candidates = [
+      lastResponse.locator('button:has(mat-icon[fonticon="download"])').first(),
+      lastResponse.locator('.button-icon-wrapper:has(mat-icon[fonticon="download"])').first(),
+      page.locator('button:has(mat-icon[fonticon="download"])').last(),
+      page.locator('.button-icon-wrapper:has(mat-icon[fonticon="download"])').last(),
+    ];
+
+    for (const candidate of candidates) {
+      if (await candidate.isVisible().catch(() => false)) return candidate;
+    }
+
+    return null;
+  }
+
+  private findMenuOption(page: Page, icon: string, label: string): Locator {
+    const labelPattern = new RegExp(this.escapeRegex(label), "i");
+
+    return page.locator("button.mat-mdc-menu-item, button[mat-menu-item]").filter({
+      has: page.locator(`mat-icon[fonticon="${icon}"]`),
+      hasText: labelPattern,
+    }).first();
+  }
+
   private async triggerDownload(page: Page, locator: Locator): Promise<Buffer | null> {
     try {
       const [download] = await Promise.all([
@@ -848,6 +930,46 @@ export class GeminiProvider {
     } catch {
       return null;
     }
+  }
+
+  private async triggerDownloadWithMeta(
+    page: Page,
+    locator: Locator,
+    filenameFallback: string,
+  ): Promise<GeneratedMedia | null> {
+    try {
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout: 20_000 }),
+        locator.click({ force: true }),
+      ]);
+      const filePath = await download.path();
+      if (!filePath) return null;
+      const { readFile } = await import("node:fs/promises");
+      const filename = download.suggestedFilename() || filenameFallback;
+      return {
+        buffer: await readFile(filePath),
+        filename,
+        mimeType: this.inferMimeType(filename),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private inferMimeType(filename: string): string {
+    const normalized = filename.toLowerCase();
+    if (normalized.endsWith(".mp3")) return "audio/mpeg";
+    if (normalized.endsWith(".wav")) return "audio/wav";
+    if (normalized.endsWith(".ogg")) return "audio/ogg";
+    if (normalized.endsWith(".m4a")) return "audio/mp4";
+    if (normalized.endsWith(".mp4")) return "video/mp4";
+    if (normalized.endsWith(".mov")) return "video/quicktime";
+    if (normalized.endsWith(".webm")) return "video/webm";
+    return "application/octet-stream";
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   private extractNewText(baseline: ConversationSnapshot, text: string): string {

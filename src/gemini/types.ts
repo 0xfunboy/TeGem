@@ -41,6 +41,11 @@ export interface GeneratedMedia {
   filename: string;
 }
 
+export interface GeneratedMusicDownloads {
+  video: GeneratedMedia | null;
+  audio: GeneratedMedia | null;
+}
+
 export interface GeminiResponse {
   text: string;
   images: GeneratedImage[];
