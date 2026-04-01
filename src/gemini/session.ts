@@ -119,10 +119,14 @@ export class GeminiSessionManager {
     const stored = this.store.get(sessionKey);
     if (stored) {
       console.log(`[Session] Restoring ${sessionKey} → ${stored.conversationUrl}`);
-      await page.goto(stored.conversationUrl, { waitUntil: "domcontentloaded" });
+      // Use "load" (not just "domcontentloaded") so Angular has time to bootstrap.
+      // Then wait for networkidle so hydration XHR calls complete before we return.
+      await page.goto(stored.conversationUrl, { waitUntil: "load", timeout: 30_000 });
+      await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
     } else {
       console.log(`[Session] New session for ${sessionKey}`);
-      await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
+      await page.goto(provider.baseUrl, { waitUntil: "load", timeout: 30_000 });
+      await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
     }
 
     return page;
