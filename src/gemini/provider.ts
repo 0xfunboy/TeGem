@@ -108,20 +108,21 @@ export class GeminiProvider {
       }
     }
 
+    // Re-focus the input before submitting in case typing caused a blur
+    await input.click().catch(() => undefined);
+    await sleep(100);
+
     let submitted = false;
 
     if (this.config.submitSelector) {
       const submit = page.locator(this.config.submitSelector).first();
       if (await submit.isVisible().catch(() => false)) {
-        await submit.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
-        await page.keyboard.press("Escape").catch(() => undefined);
-        await sleep(150);
-        await submit.click({ force: true }).catch(async () => {
-          await input.press("Enter").catch(async () => {
-            await page.keyboard.press("Enter");
-          });
-        });
-        submitted = true;
+        try {
+          await submit.click({ force: true });
+          submitted = true;
+        } catch {
+          // fall through to Enter
+        }
       }
     }
 
@@ -168,11 +169,15 @@ export class GeminiProvider {
 
       const busy = await this.isBusy(page);
       const imageStillLoading = hasImageSignal && !(await this.isImageLoaded(page));
-      // Gemini può stabilizzarsi anche mentre è ancora "busy" dopo il primo chunk,
-      // ma non deve stabilizzarsi se l'immagine è ancora in caricamento.
-      const canSettleWhileBusy = firstUsefulSignalSeen && !imageStillLoading;
+      // Only count stable ticks once we have seen useful content.
+      // Before that, only the first-chunk timeout (gated on !busy) applies.
+      const canSettle = firstUsefulSignalSeen && !imageStillLoading;
       if (!current || current === previous) {
-        stableTicks = (busy && !canSettleWhileBusy) || imageStillLoading ? 0 : stableTicks + 1;
+        if (!canSettle) {
+          stableTicks = 0; // haven't started yet — never settle prematurely
+        } else {
+          stableTicks = busy || imageStillLoading ? 0 : stableTicks + 1;
+        }
       }
 
       // Only fire the first-chunk timeout when Gemini is completely idle —
