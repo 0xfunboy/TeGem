@@ -5,7 +5,6 @@ import type { GeminiSessionManager } from "../../gemini/session.js";
 import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
 import { startTyping } from "../middleware/typing.js";
-import { GeminiNotReadyError } from "../../gemini/errors.js";
 
 export function makeImagineHandler(
   sessionManager: GeminiSessionManager,
@@ -32,60 +31,56 @@ export function makeImagineHandler(
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
 
-      const baseline = await provider.snapshotConversation(page);
+      // Inject system prompt silently if this is a fresh conversation
+      let baseline = await provider.snapshotConversation(page);
+      if (baseline.count === 0) {
+        await provider.injectSystemPrompt(page, config.systemPrompt);
+        baseline = await provider.snapshotConversation(page);
+      }
+
       const prompt = `genera un'immagine: ${args}`;
       baseline.prompt = prompt;
-
       await provider.sendPrompt(page, prompt);
 
-      // Consume the stream fully
+      // Drain the stream — image responses produce little/no text chunks
       let finalText = "";
-      let images: Array<{ src: string; alt?: string }> = [];
-
       const gen = provider.streamResponse(page, baseline);
       let next = await gen.next();
       while (!next.done) {
         next = await gen.next();
       }
+      if (next.value) finalText = next.value.text;
 
-      if (next.value) {
-        finalText = next.value.text;
-        images = next.value.images;
-      }
+      // Primary: download the full-resolution image via Gemini's download button
+      let imageBuffer = await provider.downloadLastImage(page);
 
-      // If DOM-based image capture returned nothing, try the screenshot fallback
-      if (images.length === 0) {
-        images = await provider.screenshotLastResponse(page);
+      // Fallback: screenshot the last response container
+      if (!imageBuffer) {
+        const screenshots = await provider.screenshotLastResponse(page);
+        if (screenshots.length > 0) {
+          const src = screenshots[0].src;
+          if (src.startsWith("data:")) {
+            imageBuffer = Buffer.from(src.split(",")[1], "base64");
+          }
+        }
       }
 
       stopTyping();
 
-      if (images.length > 0) {
-        for (const img of images) {
-          const base64 = img.src.startsWith("data:") ? img.src.split(",")[1] : null;
-          if (base64) {
-            const buffer = Buffer.from(base64, "base64");
-            await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
-              caption: finalText.trim() || img.alt || args,
-            });
-          } else {
-            await ctx.replyWithPhoto(img.src, { caption: finalText.trim() || img.alt || args });
-          }
-        }
+      if (imageBuffer) {
+        // Send image only (caption = text if present, else the prompt)
+        const caption = finalText.trim() || undefined;
+        await ctx.replyWithPhoto(new InputFile(imageBuffer, "image.png"), { caption });
       } else if (finalText.trim()) {
-        // Gemini replied with text only (might have declined image generation)
+        // Gemini replied with text only (e.g. declined image generation)
         await ctx.reply(finalText);
       } else {
         await ctx.reply("Gemini non ha generato immagini. Prova con una descrizione diversa.");
       }
     } catch (err) {
       stopTyping();
-      if (err instanceof GeminiNotReadyError) {
-        await ctx.reply("Gemini non è pronto. Usa /status per verificare la connessione.");
-      } else {
-        const message = err instanceof Error ? err.message : String(err);
-        await ctx.reply(`Errore: ${message}`);
-      }
+      const message = err instanceof Error ? err.message : String(err);
+      await ctx.reply(`Errore: ${message}`);
     }
   };
 }

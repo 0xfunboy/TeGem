@@ -477,6 +477,87 @@ export class GeminiProvider {
     return latest;
   }
 
+  /**
+   * Sends the system prompt to Gemini and discards its response.
+   * Call this once per fresh conversation to establish the bot's identity.
+   */
+  async injectSystemPrompt(page: Page, systemPrompt: string): Promise<void> {
+    await this.ensureReady(page);
+    const baseline = await this.snapshotConversation(page);
+    await this.sendPrompt(page, systemPrompt);
+    // Drain the generator and discard every chunk
+    try {
+      const gen = this.streamResponse(page, baseline);
+      let n = await gen.next();
+      while (!n.done) n = await gen.next();
+    } catch {
+      // Ignore — we only care that Gemini received the prompt, not what it replied
+    }
+  }
+
+  /**
+   * Hovers over the last generated image, clicks Gemini's download button and
+   * intercepts the resulting Playwright download event to obtain the raw bytes.
+   * Returns null if no image download can be triggered.
+   */
+  async downloadLastImage(page: Page): Promise<Buffer | null> {
+    for (const containerSel of ["generated-image", "single-image", ".generated-images"]) {
+      const container = page.locator(containerSel).last();
+      if (!(await container.isVisible().catch(() => false))) continue;
+
+      // Hover to reveal the action bar buttons
+      await container.hover({ force: true }).catch(() => undefined);
+      await sleep(700);
+
+      // Strategy 1: direct download icon visible in the action bar
+      const directBtn = page
+        .locator(".button-icon-wrapper")
+        .filter({ has: page.locator('mat-icon[fonticon="download"]') })
+        .last();
+
+      if (await directBtn.isVisible().catch(() => false)) {
+        const buf = await this.triggerDownload(page, directBtn);
+        if (buf) return buf;
+      }
+
+      // Strategy 2: open the "⋮" menu → "Download image" menu item
+      const moreBtn = page
+        .locator('button[aria-label*="More"], button[aria-label*="options"], mat-icon[fonticon="more_vert"]')
+        .last();
+
+      if (await moreBtn.isVisible().catch(() => false)) {
+        await moreBtn.click({ force: true }).catch(() => undefined);
+        await sleep(400);
+
+        const menuItem = page.locator('[data-test-id="image-download-button"]').first();
+        if (await menuItem.isVisible().catch(() => false)) {
+          const buf = await this.triggerDownload(page, menuItem);
+          if (buf) return buf;
+        }
+
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await sleep(200);
+      }
+    }
+
+    return null;
+  }
+
+  private async triggerDownload(page: Page, locator: Locator): Promise<Buffer | null> {
+    try {
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout: 20_000 }),
+        locator.click({ force: true }),
+      ]);
+      const filePath = await download.path();
+      if (!filePath) return null;
+      const { readFile } = await import("node:fs/promises");
+      return readFile(filePath);
+    } catch {
+      return null;
+    }
+  }
+
   private extractNewText(baseline: ConversationSnapshot, text: string): string {
     const current = this.sanitize(text, baseline.prompt);
     if (!current) return "";
