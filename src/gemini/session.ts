@@ -1,4 +1,4 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
 import { chromium, type BrowserContext, type Page } from "playwright";
@@ -11,16 +11,11 @@ Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
 `;
 
-interface GeminiSession {
-  profilePath: string;
-  context: BrowserContext;
-  page: Page;
-}
-
 export class GeminiSessionManager {
   private context: BrowserContext | null = null;
-  private session: GeminiSession | null = null;
   private pendingLaunch: Promise<BrowserContext> | null = null;
+  /** One page per session key (e.g. "user_123" or "group_-100456"). */
+  private pages: Map<string, Page> = new Map();
 
   constructor(private readonly config: GeminiConfig) {}
 
@@ -32,72 +27,75 @@ export class GeminiSessionManager {
     );
   }
 
-  async hasPersistedProfile(relativeDir: string): Promise<boolean> {
-    try {
-      const entries = await readdir(this.resolveProfilePath(relativeDir));
-      return entries.length > 0;
-    } catch {
-      return false;
+  /** Returns the page for the given session key, or null if it doesn't exist / is closed. */
+  getPage(sessionKey: string): Page | null {
+    const page = this.pages.get(sessionKey);
+    if (!page || page.isClosed()) {
+      this.pages.delete(sessionKey);
+      return null;
     }
+    return page;
   }
 
+  /** Returns true if the browser context is alive. */
   isAlive(): boolean {
-    if (!this.session) return false;
-    if (this.session.page.isClosed()) return false;
+    if (!this.context) return false;
     try {
-      this.session.context.pages();
+      this.context.pages();
       return true;
     } catch {
       return false;
     }
   }
 
-  getPage(): Page | null {
-    return this.isAlive() ? this.session!.page : null;
+  /** Returns the number of active session pages. */
+  sessionCount(): number {
+    return this.pages.size;
   }
 
-  async getOrCreate(provider: GeminiProviderConfig, profilePath: string): Promise<GeminiSession> {
-    if (this.session && this.isAlive()) {
-      if (this.session.profilePath === profilePath) return this.session;
-      await this.session.page.close().catch(() => undefined);
-      this.session = null;
-    } else if (this.session) {
-      this.session = null;
-    }
+  /**
+   * Returns an existing open page for the session key, or creates a new one.
+   * All pages share the same browser context (same Google account / cookies).
+   */
+  async getOrCreate(provider: GeminiProviderConfig, sessionKey: string): Promise<Page> {
+    const existing = this.getPage(sessionKey);
+    if (existing) return existing;
 
-    const context = await this.ensureContext(profilePath);
+    const context = await this.ensureContext();
     const page = await context.newPage();
-    this.session = { profilePath, context, page };
 
-    page.on("close", () => {
-      if (this.session?.page === page) this.session = null;
-    });
+    this.pages.set(sessionKey, page);
+    page.on("close", () => this.pages.delete(sessionKey));
 
-    return this.session;
+    // Navigate to a fresh conversation so each session starts cleanly
+    await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
+
+    return page;
   }
 
-  async openForLogin(provider: GeminiProviderConfig, relativeDir: string): Promise<Page> {
-    const profilePath = this.resolveProfilePath(relativeDir);
-    const hadPersisted = await this.hasPersistedProfile(relativeDir);
-    const session = await this.getOrCreate(provider, profilePath);
-    const targetUrl = hadPersisted ? provider.baseUrl : provider.baseUrl;
-    await session.page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-    await session.page.bringToFront();
-    return session.page;
+  /** Opens a page for manual login. Uses the shared context. */
+  async openForLogin(provider: GeminiProviderConfig): Promise<Page> {
+    const context = await this.ensureContext();
+    // Reuse an existing page if available, otherwise open a new one
+    const existing = context.pages().find((p) => !p.isClosed());
+    const page = existing ?? await context.newPage();
+    await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
+    await page.bringToFront();
+    return page;
   }
 
   async close(): Promise<void> {
-    if (this.session) {
-      await this.session.page.close().catch(() => undefined);
-      this.session = null;
+    for (const page of this.pages.values()) {
+      await page.close().catch(() => undefined);
     }
+    this.pages.clear();
     if (this.context) {
       await this.context.close().catch(() => undefined);
       this.context = null;
     }
   }
 
-  private async ensureContext(profilePath: string): Promise<BrowserContext> {
+  private async ensureContext(): Promise<BrowserContext> {
     if (this.context) {
       try {
         this.context.pages();
@@ -109,7 +107,7 @@ export class GeminiSessionManager {
 
     if (this.pendingLaunch) return this.pendingLaunch;
 
-    this.pendingLaunch = this.doLaunch(profilePath);
+    this.pendingLaunch = this.doLaunch();
     try {
       return await this.pendingLaunch;
     } finally {
@@ -117,7 +115,8 @@ export class GeminiSessionManager {
     }
   }
 
-  private async doLaunch(profilePath: string): Promise<BrowserContext> {
+  private async doLaunch(): Promise<BrowserContext> {
+    const profilePath = this.resolveProfilePath("_shared");
     await mkdir(profilePath, { recursive: true });
 
     const context = await chromium.launchPersistentContext(profilePath, {
@@ -140,7 +139,7 @@ export class GeminiSessionManager {
 
     context.on("close", () => {
       this.context = null;
-      this.session = null;
+      this.pages.clear();
     });
 
     this.context = context;

@@ -1,27 +1,34 @@
 import type { CommandContext, Context } from "grammy";
 
 import type { GeminiSessionManager } from "../../gemini/session.js";
+import { getSessionKey } from "../sessionKey.js";
 
 export function makeStatusHandler(sessionManager: GeminiSessionManager) {
   return async (ctx: CommandContext<Context>): Promise<void> => {
+    const sessionKey = getSessionKey(ctx);
     const alive = sessionManager.isAlive();
-    const page = sessionManager.getPage();
+    const page = sessionManager.getPage(sessionKey);
 
-    let geminiStatus = "Non connesso";
+    let geminiStatus = "Not connected";
     if (alive && page) {
       try {
-        const isReady = !page.isClosed();
-        geminiStatus = isReady ? `Connesso (${page.url().split("?")[0]})` : "Pagina chiusa";
+        geminiStatus = page.isClosed()
+          ? "Page closed"
+          : `Connected (${page.url().split("?")[0]})`;
       } catch {
-        geminiStatus = "Errore di sessione";
+        geminiStatus = "Session error";
       }
+    } else if (alive) {
+      geminiStatus = `Browser alive — no session for ${sessionKey} yet`;
     }
 
     await ctx.reply(
-      `*Stato TeGem*\n\n` +
+      `*TeGem Status*\n\n` +
       `Bot: Online\n` +
+      `Session: ${sessionKey}\n` +
       `Gemini: ${geminiStatus}\n` +
-      `Headless: ${process.env.PLAYWRIGHT_HEADLESS === "true" ? "Sì" : "No"}`,
+      `Active sessions: ${sessionManager.sessionCount()}\n` +
+      `Headless: ${process.env.PLAYWRIGHT_HEADLESS === "true" ? "Yes" : "No"}`,
       { parse_mode: "Markdown" },
     );
   };

@@ -3,7 +3,7 @@ import type { Context, NextFunction } from "grammy";
 import type { AppConfig } from "../../config.js";
 
 const UNAUTHORIZED_MESSAGE =
-  "Utente o gruppo non abilitato. Contatta @funboynft per richiedere l'autorizzazione.";
+  "User or group not authorized. Contact @funboynft to request access.";
 
 export function createAuthMiddleware(config: AppConfig) {
   return async (ctx: Context, next: NextFunction): Promise<void> => {
@@ -21,7 +21,6 @@ export function createAuthMiddleware(config: AppConfig) {
       if (config.allowedGroups.length > 0) {
         const chatId = ctx.chat?.id;
         if (!chatId || !config.allowedGroups.includes(chatId)) {
-          // Silent drop in groups to avoid spam
           return;
         }
       }
