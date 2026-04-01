@@ -4,6 +4,7 @@ import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 
 import type { GeminiConfig, GeminiProviderConfig } from "./types.js";
+import { ConversationStore, type StoredSession } from "./conversationStore.js";
 
 const STEALTH_INIT_SCRIPT = `
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -14,10 +15,18 @@ Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
 export class GeminiSessionManager {
   private context: BrowserContext | null = null;
   private pendingLaunch: Promise<BrowserContext> | null = null;
-  /** One page per session key (e.g. "user_123" or "group_-100456"). */
+  /** One Page per session key. */
   private pages: Map<string, Page> = new Map();
+  /** Persistent mapping: sessionKey → conversationId / URL. */
+  private store: ConversationStore;
 
-  constructor(private readonly config: GeminiConfig) {}
+  constructor(private readonly config: GeminiConfig) {
+    const storeDir = path.join(
+      config.baseProfileDir,
+      config.profileNamespace,
+    );
+    this.store = new ConversationStore(storeDir);
+  }
 
   resolveProfilePath(relativeDir: string): string {
     return path.join(
@@ -27,7 +36,7 @@ export class GeminiSessionManager {
     );
   }
 
-  /** Returns the page for the given session key, or null if it doesn't exist / is closed. */
+  /** Returns the live page for the session key, or null if closed/missing. */
   getPage(sessionKey: string): Page | null {
     const page = this.pages.get(sessionKey);
     if (!page || page.isClosed()) {
@@ -48,16 +57,26 @@ export class GeminiSessionManager {
     }
   }
 
-  /** Returns the number of active session pages. */
+  /** Number of currently open session pages. */
   sessionCount(): number {
     return this.pages.size;
   }
 
+  /** Returns the stored conversation info for a session key (if any). */
+  getStoredSession(sessionKey: string): StoredSession | undefined {
+    return this.store.get(sessionKey);
+  }
+
   /**
-   * Returns an existing open page for the session key, or creates a new one.
-   * All pages share the same browser context (same Google account / cookies).
+   * Returns the live page for the session key if it exists, otherwise creates
+   * a new browser tab and navigates it to the right place:
+   *   - If a conversation was previously stored → navigate to that URL
+   *   - Otherwise → navigate to baseUrl to start a fresh conversation
+   *
+   * After the first message Gemini changes the URL to include the conversation
+   * ID. We track that change and persist it automatically.
    */
-  async getOrCreate(provider: GeminiProviderConfig, sessionKey: string): Promise<Page> {
+  async getOrCreate(provider: GeminiProviderConfig, sessionKey: string, label?: string): Promise<Page> {
     const existing = this.getPage(sessionKey);
     if (existing) return existing;
 
@@ -67,18 +86,37 @@ export class GeminiSessionManager {
     this.pages.set(sessionKey, page);
     page.on("close", () => this.pages.delete(sessionKey));
 
-    // Navigate to a fresh conversation so each session starts cleanly
-    await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
+    // Start URL tracking so we capture the conversation ID after first message
+    this.trackConversationUrl(page, sessionKey, label ?? sessionKey, provider.baseUrl);
+
+    const stored = this.store.get(sessionKey);
+    if (stored) {
+      console.log(`[Session] Restoring ${sessionKey} → ${stored.conversationUrl}`);
+      await page.goto(stored.conversationUrl, { waitUntil: "domcontentloaded" });
+    } else {
+      console.log(`[Session] New session for ${sessionKey}`);
+      await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
+    }
 
     return page;
   }
 
-  /** Opens a page for manual login. Uses the shared context. */
+  /**
+   * Clears a session: navigates its page to a fresh Gemini conversation and
+   * removes the stored conversation ID so a new one will be captured.
+   */
+  async clearSession(provider: GeminiProviderConfig, sessionKey: string): Promise<void> {
+    this.store.delete(sessionKey);
+    const page = this.getPage(sessionKey);
+    if (page) {
+      await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
+    }
+  }
+
+  /** Opens a temporary page for login verification. Caller should close it when done. */
   async openForLogin(provider: GeminiProviderConfig): Promise<Page> {
     const context = await this.ensureContext();
-    // Reuse an existing page if available, otherwise open a new one
-    const existing = context.pages().find((p) => !p.isClosed());
-    const page = existing ?? await context.newPage();
+    const page = await context.newPage();
     await page.goto(provider.baseUrl, { waitUntil: "domcontentloaded" });
     await page.bringToFront();
     return page;
@@ -93,6 +131,42 @@ export class GeminiSessionManager {
       await this.context.close().catch(() => undefined);
       this.context = null;
     }
+  }
+
+  // ── Private ──────────────────────────────────────────────────────
+
+  /**
+   * Listens for URL changes on the page. When Gemini navigates from the base
+   * URL to a conversation URL (after the first message), we extract the
+   * conversation ID and persist it.
+   */
+  private trackConversationUrl(
+    page: Page,
+    sessionKey: string,
+    label: string,
+    baseUrl: string,
+  ): void {
+    const handler = (frame: import("playwright").Frame): void => {
+      if (frame !== page.mainFrame()) return;
+      const url = frame.url();
+      // Match: https://gemini.google.com/app/{conversationId}
+      const match = url.match(/\/app\/([a-f0-9]{8,})/i);
+      if (!match) return;
+      const conversationId = match[1];
+      const existing = this.store.get(sessionKey);
+      if (existing?.conversationId === conversationId) return; // already stored
+      const session: StoredSession = {
+        conversationId,
+        conversationUrl: url,
+        label,
+        updatedAt: new Date().toISOString(),
+      };
+      this.store.set(sessionKey, session);
+      console.log(`[Session] Stored conversation for ${sessionKey}: ${conversationId}`);
+    };
+
+    page.on("framenavigated", handler);
+    page.on("close", () => page.off("framenavigated", handler));
   }
 
   private async ensureContext(): Promise<BrowserContext> {

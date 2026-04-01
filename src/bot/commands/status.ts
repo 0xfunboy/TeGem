@@ -8,6 +8,7 @@ export function makeStatusHandler(sessionManager: GeminiSessionManager) {
     const sessionKey = getSessionKey(ctx);
     const alive = sessionManager.isAlive();
     const page = sessionManager.getPage(sessionKey);
+    const stored = sessionManager.getStoredSession(sessionKey);
 
     let geminiStatus = "Not connected";
     if (alive && page) {
@@ -19,15 +20,21 @@ export function makeStatusHandler(sessionManager: GeminiSessionManager) {
         geminiStatus = "Session error";
       }
     } else if (alive) {
-      geminiStatus = `Browser alive — no session for ${sessionKey} yet`;
+      geminiStatus = stored
+        ? `Stored — will reconnect to ${stored.conversationId}`
+        : "Browser alive — no tab yet";
     }
+
+    const convLine = stored
+      ? `Conversation: \`${stored.conversationId}\` (${stored.label})`
+      : "Conversation: not yet assigned";
 
     await ctx.reply(
       `*TeGem Status*\n\n` +
-      `Bot: Online\n` +
-      `Session: ${sessionKey}\n` +
+      `Session key: \`${sessionKey}\`\n` +
+      `${convLine}\n` +
       `Gemini: ${geminiStatus}\n` +
-      `Active sessions: ${sessionManager.sessionCount()}\n` +
+      `Active tabs: ${sessionManager.sessionCount()}\n` +
       `Headless: ${process.env.PLAYWRIGHT_HEADLESS === "true" ? "Yes" : "No"}`,
       { parse_mode: "Markdown" },
     );
