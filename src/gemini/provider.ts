@@ -219,7 +219,7 @@ export class GeminiProvider {
         innerText?: string;
       };
 
-      const doc = (globalThis as { document?: DomLike }).document;
+      const doc = (globalThis as unknown as { document?: DomLike }).document;
       if (!doc) return "";
 
       const all = doc.querySelectorAll("message-content") as NodeLike[];
@@ -251,7 +251,7 @@ export class GeminiProvider {
       type DomLike = { querySelectorAll: (s: string) => unknown[] };
       type NodeLike = { parentElement?: { closest?: (s: string) => unknown } | null };
 
-      const doc = (globalThis as { document?: DomLike }).document;
+      const doc = (globalThis as unknown as { document?: DomLike }).document;
       if (!doc) return 0;
 
       const all = doc.querySelectorAll("message-content") as NodeLike[];
@@ -377,7 +377,7 @@ export class GeminiProvider {
         } catch { return src; }
       };
 
-      const doc = (globalThis as { document?: DomLike }).document;
+      const doc = (globalThis as unknown as { document?: DomLike }).document;
       if (!doc) return [];
       const all = Array.from(doc.querySelectorAll("message-content")) as NodeLike[];
       const topLevel = all.filter((el) => el.parentElement?.closest?.("message-content") === null);
