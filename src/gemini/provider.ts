@@ -56,6 +56,7 @@ export class GeminiProvider {
   async snapshotConversation(page: Page): Promise<ConversationSnapshot> {
     const mainText = await this.readMainText(page);
     const imageKeys = await this.listVisibleImageKeys(page);
+    const imageNodeCount = await this.countImageNodes(page);
     const providerText = await this.readAssistantText(page);
 
     if (providerText) {
@@ -64,6 +65,7 @@ export class GeminiProvider {
         lastText: this.sanitize(providerText),
         mainText,
         imageKeys,
+        imageNodeCount,
       };
     }
 
@@ -73,10 +75,10 @@ export class GeminiProvider {
       if (count === 0) continue;
 
       const lastText = this.sanitize(((await locator.last().innerText().catch(() => "")) || "").trim());
-      return { count, lastText, mainText, imageKeys };
+      return { count, lastText, mainText, imageKeys, imageNodeCount };
     }
 
-    return { count: 0, lastText: "", mainText, imageKeys };
+    return { count: 0, lastText: "", mainText, imageKeys, imageNodeCount };
   }
 
   async sendPrompt(page: Page, prompt: string): Promise<void> {
@@ -342,8 +344,20 @@ export class GeminiProvider {
     return "";
   }
 
-  private async hasNewImages(page: Page, _baseline: ConversationSnapshot): Promise<boolean> {
-    // Primary: check for Gemini image-generation custom elements (visible + reasonably sized)
+  private async countImageNodes(page: Page): Promise<number> {
+    let total = 0;
+    for (const selector of ["generated-image", "single-image", ".generated-images"]) {
+      total += await page.locator(selector).count().catch(() => 0);
+    }
+    return total;
+  }
+
+  private async hasNewImages(page: Page, baseline: ConversationSnapshot): Promise<boolean> {
+    // Only signal new images if the count of image elements has grown since baseline
+    const current = await this.countImageNodes(page);
+    if (current <= baseline.imageNodeCount) return false;
+
+    // Also confirm the new element is actually visible and reasonably sized
     for (const selector of ["generated-image", "single-image", ".generated-images"]) {
       const el = page.locator(selector).last();
       if (await el.isVisible().catch(() => false)) {
@@ -524,6 +538,79 @@ export class GeminiProvider {
     }
 
     return null;
+  }
+
+  /**
+   * Clicks the "⋮" menu on the last response container, then "Listen", and
+   * intercepts the audio network response to obtain the raw audio bytes.
+   * Returns null if no audio can be captured.
+   */
+  async downloadLastResponseAudio(page: Page): Promise<Buffer | null> {
+    // Register audio interceptor BEFORE opening the menu
+    let resolveAudio!: (buf: Buffer | null) => void;
+    const audioPromise = new Promise<Buffer | null>((res) => { resolveAudio = res; });
+    let cleanedUp = false;
+
+    const responseHandler = async (response: import("playwright").Response): Promise<void> => {
+      if (cleanedUp) return;
+      const ct = response.headers()["content-type"] ?? "";
+      if (ct.startsWith("audio/") || ct.includes("mpeg") || ct.includes("ogg") || ct.includes("wav") || ct.includes("aac")) {
+        cleanedUp = true;
+        page.off("response", responseHandler);
+        try {
+          resolveAudio(Buffer.from(await response.body()));
+        } catch {
+          resolveAudio(null);
+        }
+      }
+    };
+
+    page.on("response", responseHandler);
+    const cleanup = (): void => {
+      if (!cleanedUp) {
+        cleanedUp = true;
+        page.off("response", responseHandler);
+        resolveAudio(null);
+      }
+    };
+
+    const timeoutId = setTimeout(cleanup, 20_000);
+
+    try {
+      // Click the "⋮" (more options) button on the last response container
+      const lastResponse = page.locator("response-container").last();
+      const moreBtn = lastResponse
+        .locator('button:has(mat-icon[fonticon="more_vert"]), button[aria-label*="More"], button[aria-label*="more"]')
+        .first();
+
+      if (!(await moreBtn.isVisible().catch(() => false))) {
+        cleanup();
+        return null;
+      }
+
+      await moreBtn.click({ force: true });
+      await sleep(500);
+
+      // Click "Listen"
+      const listenBtn = page
+        .locator('button[aria-labelledby="tts-label"], button:has(mat-icon[fonticon="volume_up"])')
+        .first();
+
+      if (!(await listenBtn.isVisible().catch(() => false))) {
+        await page.keyboard.press("Escape").catch(() => undefined);
+        cleanup();
+        return null;
+      }
+
+      await listenBtn.click({ force: true });
+      const buf = await audioPromise;
+      return buf;
+    } catch {
+      cleanup();
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   private async triggerDownload(page: Page, locator: Locator): Promise<Buffer | null> {
