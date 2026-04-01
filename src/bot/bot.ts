@@ -13,6 +13,8 @@ import { handleHelp } from "./commands/help.js";
 import { makeClearHandler } from "./commands/clear.js";
 import { makeStatusHandler } from "./commands/status.js";
 import { makeImagineHandler } from "./commands/imagine.js";
+import { makeMusicHandler } from "./commands/music.js";
+import { makeVideoHandler } from "./commands/video.js";
 import { makeVoiceHandler } from "./commands/voice.js";
 
 /**
@@ -76,8 +78,39 @@ export function createBot(
   // ── Auth middleware ────────────────────────────────────────
   bot.use(createAuthMiddleware(config));
 
+  /**
+   * Downloads a Telegram file (photo, document, etc.) to a temp path.
+   * Returns the local file path or null on failure.
+   */
+  async function downloadTelegramFile(ctx: Context, fileId: string): Promise<string | null> {
+    try {
+      const file = await ctx.api.getFile(fileId);
+      const filePath = file.file_path;
+      if (!filePath) return null;
+      const url = `https://api.telegram.org/file/bot${config.telegram.token}/${filePath}`;
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      const { writeFile, mkdtemp } = await import("node:fs/promises");
+      const { tmpdir } = await import("node:os");
+      const path = await import("node:path");
+      const dir = await mkdtemp(path.default.join(tmpdir(), "tegem-"));
+      const ext = filePath.split(".").pop() ?? "bin";
+      const localPath = path.default.join(dir, `upload.${ext}`);
+      await writeFile(localPath, buf);
+      return localPath;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Shared Gemini query helper ─────────────────────────────
-  async function runQuery(ctx: Context, text: string, replyToMsgId?: number): Promise<void> {
+  async function runQuery(
+    ctx: Context,
+    text: string,
+    replyToMsgId?: number,
+    mediaFilePath?: string,
+  ): Promise<void> {
     const stopTyping = startTyping(ctx);
     const replyExtra = replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
     const sentMsg = await ctx.reply("…", replyExtra);
@@ -91,6 +124,11 @@ export function createBot(
 
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
+
+      // If a media file was attached, upload it to Gemini first
+      if (mediaFilePath) {
+        await provider.uploadFile(page, mediaFilePath);
+      }
 
       const baseline = await provider.snapshotConversation(page);
       baseline.prompt = text;
@@ -169,16 +207,28 @@ export function createBot(
   bot.command("clear", makeClearHandler(sessionManager, provider));
   bot.command("status", makeStatusHandler(sessionManager));
   bot.command("imagine", makeImagineHandler(sessionManager, provider, config));
+  bot.command("music", makeMusicHandler(sessionManager, provider, config));
+  bot.command("video", makeVideoHandler(sessionManager, provider, config));
   bot.command("voice", makeVoiceHandler(sessionManager, provider));
 
   // /q — natural language query, works in both groups and private
+  // Supports photo attachments: send /q with a photo to include it in the prompt
   bot.command("q", async (ctx) => {
     const text = ctx.match?.trim();
     if (!text) {
-      await ctx.reply("Uso: /q <domanda>\nEsempio: /q qual è la capitale della Francia?");
+      await ctx.reply("Usage: /q <question>\nExample: /q what is the capital of France?\n\nYou can also attach a photo with the command.");
       return;
     }
-    await runQuery(ctx, text, ctx.message?.message_id);
+
+    // Check if there's a photo attached to this message
+    let mediaPath: string | undefined;
+    const photo = ctx.message?.photo;
+    if (photo && photo.length > 0) {
+      const fileId = photo[photo.length - 1].file_id; // highest resolution
+      mediaPath = (await downloadTelegramFile(ctx, fileId)) ?? undefined;
+    }
+
+    await runQuery(ctx, text, ctx.message?.message_id, mediaPath);
   });
 
   // ── Message handler ────────────────────────────────────────
@@ -229,7 +279,71 @@ export function createBot(
         return;
       }
 
-      await runQuery(ctx, question, msg.message_id);
+      // If the @mention was in a reply to another message, thread the bot's
+      // response to that ORIGINAL message (not the tagger's message).
+      const replyTarget = msg.reply_to_message?.message_id ?? msg.message_id;
+      await runQuery(ctx, question, replyTarget);
+    }
+  });
+
+  // ── Photo/document handler ──────────────────────────────────
+  // Handles photos sent in private chat or with @mention in groups
+  bot.on(["message:photo", "message:document"], async (ctx) => {
+    const msg = ctx.message;
+    const chatType = ctx.chat.type;
+    const caption = msg.caption?.trim() ?? "";
+    const entities = msg.caption_entities ?? [];
+    const botUsername = ctx.me.username ?? "";
+    const botId = ctx.me.id;
+
+    // Get the file ID
+    let fileId: string | undefined;
+    if ("photo" in msg && msg.photo && msg.photo.length > 0) {
+      fileId = msg.photo[msg.photo.length - 1].file_id;
+    } else if ("document" in msg && msg.document) {
+      fileId = msg.document.file_id;
+    }
+    if (!fileId) return;
+
+    if (chatType === "private") {
+      // In private: always process photos, use caption as prompt
+      const prompt = caption || "Describe this image";
+      const mediaPath = await downloadTelegramFile(ctx, fileId);
+      if (!mediaPath) {
+        await ctx.reply("Could not download the file.");
+        return;
+      }
+      await runQuery(ctx, prompt, undefined, mediaPath);
+      return;
+    }
+
+    // In groups: only respond if @mentioned in the caption
+    if (chatType === "group" || chatType === "supergroup") {
+      const isMentioned = entities.some(
+        (e) =>
+          (e.type === "mention" && caption.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
+          (e.type === "text_mention" && e.user?.id === botId),
+      );
+      if (!isMentioned) return;
+
+      // Strip mentions from caption
+      let question = caption;
+      for (const e of [...entities].reverse()) {
+        if (
+          (e.type === "mention" && caption.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
+          (e.type === "text_mention" && e.user?.id === botId)
+        ) {
+          question = question.slice(0, e.offset) + question.slice(e.offset + e.length);
+        }
+      }
+      question = question.trim() || "Describe this image";
+
+      const mediaPath = await downloadTelegramFile(ctx, fileId);
+      if (!mediaPath) {
+        await ctx.reply("Could not download the file.", { reply_parameters: { message_id: msg.message_id } });
+        return;
+      }
+      await runQuery(ctx, question, msg.message_id, mediaPath);
     }
   });
 

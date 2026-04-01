@@ -35,6 +35,12 @@ export interface GeneratedImage {
   alt?: string;
 }
 
+export interface GeneratedMedia {
+  buffer: Buffer;
+  mimeType: string;
+  filename: string;
+}
+
 export interface GeminiResponse {
   text: string;
   images: GeneratedImage[];

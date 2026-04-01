@@ -660,72 +660,179 @@ export class GeminiProvider {
    * intercepts the audio network response to obtain the raw audio bytes.
    * Returns null if no audio can be captured.
    */
+  /**
+   * Clicks the "⋮" menu on the last response, selects "Listen", and
+   * intercepts the TTS audio network response.
+   */
   async downloadLastResponseAudio(page: Page): Promise<Buffer | null> {
-    // Register audio interceptor BEFORE opening the menu
-    let resolveAudio!: (buf: Buffer | null) => void;
-    const audioPromise = new Promise<Buffer | null>((res) => { resolveAudio = res; });
-    let cleanedUp = false;
+    // Register a route interceptor to capture audio responses BEFORE triggering them.
+    // This is more reliable than page.on("response") because routes fire synchronously.
+    let audioBuffer: Buffer | null = null;
+    let gotAudio = false;
 
-    const responseHandler = async (response: import("playwright").Response): Promise<void> => {
-      if (cleanedUp) return;
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      // Let the request through, then inspect the response
+      const response = await route.fetch().catch(() => null);
+      if (!response) { await route.abort().catch(() => undefined); return; }
+
       const ct = response.headers()["content-type"] ?? "";
-      if (ct.startsWith("audio/") || ct.includes("mpeg") || ct.includes("ogg") || ct.includes("wav") || ct.includes("aac")) {
-        cleanedUp = true;
-        page.off("response", responseHandler);
-        try {
-          resolveAudio(Buffer.from(await response.body()));
-        } catch {
-          resolveAudio(null);
-        }
+      if (!gotAudio && (ct.startsWith("audio/") || ct.includes("mpeg") || ct.includes("ogg"))) {
+        gotAudio = true;
+        audioBuffer = Buffer.from(await response.body());
       }
-    };
 
-    page.on("response", responseHandler);
-    const cleanup = (): void => {
-      if (!cleanedUp) {
-        cleanedUp = true;
-        page.off("response", responseHandler);
-        resolveAudio(null);
-      }
-    };
-
-    const timeoutId = setTimeout(cleanup, 20_000);
+      await route.fulfill({ response }).catch(() => undefined);
+    });
 
     try {
-      // Click the "⋮" (more options) button on the last response container
+      // Find and click the ⋮ button on the last response-container
       const lastResponse = page.locator("response-container").last();
+
+      // Hover over the response first — the ⋮ button may only appear on hover
+      await lastResponse.hover({ force: true }).catch(() => undefined);
+      await sleep(400);
+
+      // Look for the ⋮ button both inside the response and in the action bar
       const moreBtn = lastResponse
-        .locator('button:has(mat-icon[fonticon="more_vert"]), button[aria-label*="More"], button[aria-label*="more"]')
+        .locator('button:has(mat-icon[fonticon="more_vert"])')
         .first();
 
-      if (!(await moreBtn.isVisible().catch(() => false))) {
-        cleanup();
+      if (!(await moreBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
         return null;
       }
 
       await moreBtn.click({ force: true });
-      await sleep(500);
+      await sleep(600);
 
-      // Click "Listen"
+      // Click "Listen" — it should be in a mat-menu overlay
       const listenBtn = page
-        .locator('button[aria-labelledby="tts-label"], button:has(mat-icon[fonticon="volume_up"])')
+        .locator('button:has(mat-icon[fonticon="volume_up"])')
         .first();
 
-      if (!(await listenBtn.isVisible().catch(() => false))) {
-        await page.keyboard.press("Escape").catch(() => undefined);
-        cleanup();
-        return null;
+      if (!(await listenBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
+        // Try the tts-label selector as fallback
+        const fallback = page.locator('button[aria-labelledby="tts-label"]').first();
+        if (await fallback.isVisible({ timeout: 2_000 }).catch(() => false)) {
+          await fallback.click({ force: true });
+        } else {
+          // Dismiss menu
+          const contentEditable = page.locator("rich-textarea div[contenteditable='true']").first();
+          await contentEditable.press("Escape").catch(() => undefined);
+          return null;
+        }
+      } else {
+        await listenBtn.click({ force: true });
       }
 
-      await listenBtn.click({ force: true });
-      const buf = await audioPromise;
-      return buf;
-    } catch {
-      cleanup();
-      return null;
+      // Wait for the audio to arrive via the route interceptor
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline && !gotAudio) {
+        await sleep(500);
+      }
+
+      return audioBuffer;
     } finally {
-      clearTimeout(timeoutId);
+      // Remove the route interceptor
+      await page.unroute("**/*").catch(() => undefined);
     }
+  }
+
+  /**
+   * Uploads a file to Gemini's input area using the "+" attachment button.
+   * Gemini accepts images, audio, video, PDFs, etc.
+   */
+  async uploadFile(page: Page, filePath: string): Promise<void> {
+    // Gemini uses a hidden file input inside the attachment mechanism.
+    // We set the file on the input[type=file] element directly.
+    const fileInput = page.locator('input[type="file"]').first();
+
+    // If the file input isn't in the DOM yet, click the "+" button to trigger it
+    if (!(await fileInput.count().catch(() => 0))) {
+      const addBtn = page.locator('button[aria-label*="Add"], button:has(mat-icon[fonticon="add"])').first();
+      if (await addBtn.isVisible().catch(() => false)) {
+        await addBtn.click({ force: true });
+        await sleep(500);
+      }
+    }
+
+    await fileInput.setInputFiles(filePath);
+    // Wait for the upload preview to appear
+    await sleep(2_000);
+  }
+
+  /**
+   * Waits for a generated media element (audio/video) to appear in the last
+   * response, then intercepts the download or extracts the blob URL.
+   * Works for Gemini's music and video generation features.
+   */
+  async downloadGeneratedMedia(page: Page, timeoutMs = 120_000): Promise<import("./types.js").GeneratedMedia | null> {
+    const deadline = Date.now() + timeoutMs;
+
+    // Poll for audio/video elements in the last response
+    while (Date.now() < deadline) {
+      // Check for <audio> or <video> elements with a src
+      const media = await page.evaluate((): { src: string; type: string } | null => {
+        const responses = document.querySelectorAll("response-container, message-content");
+        if (responses.length === 0) return null;
+        const last = responses[responses.length - 1];
+
+        // Check for <audio> elements
+        const audio = last.querySelector("audio") as HTMLAudioElement | null;
+        if (audio?.src) return { src: audio.src, type: "audio" };
+        const audioSource = last.querySelector("audio source") as HTMLSourceElement | null;
+        if (audioSource?.src) return { src: audioSource.src, type: "audio" };
+
+        // Check for <video> elements
+        const video = last.querySelector("video") as HTMLVideoElement | null;
+        if (video?.src) return { src: video.src, type: "video" };
+        const videoSource = last.querySelector("video source") as HTMLSourceElement | null;
+        if (videoSource?.src) return { src: videoSource.src, type: "video" };
+
+        return null;
+      }).catch(() => null);
+
+      if (media?.src) {
+        // Fetch the media blob via page.evaluate to handle blob: URLs
+        const result = await page.evaluate(async (src: string): Promise<{ data: string; mime: string } | null> => {
+          try {
+            const res = await fetch(src);
+            const blob = await res.blob();
+            const arrayBuf = await blob.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuf);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return { data: btoa(binary), mime: blob.type || "application/octet-stream" };
+          } catch {
+            return null;
+          }
+        }, media.src).catch(() => null);
+
+        if (result) {
+          const ext = media.type === "audio" ? "mp3" : "mp4";
+          return {
+            buffer: Buffer.from(result.data, "base64"),
+            mimeType: result.mime,
+            filename: `generated.${ext}`,
+          };
+        }
+      }
+
+      // Also try download button approach — some media has a download action
+      const dlBtn = page.locator("response-container").last()
+        .locator('button:has(mat-icon[fonticon="download"])').first();
+      if (await dlBtn.isVisible().catch(() => false)) {
+        const buf = await this.triggerDownload(page, dlBtn);
+        if (buf) {
+          // Infer type from context
+          return { buffer: buf, mimeType: "application/octet-stream", filename: "generated_media" };
+        }
+      }
+
+      await sleep(2_000);
+    }
+
+    return null;
   }
 
   private async triggerDownload(page: Page, locator: Locator): Promise<Buffer | null> {
