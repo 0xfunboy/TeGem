@@ -36,10 +36,13 @@ export function makeImagineHandler(
       baseline.prompt = prompt;
       await provider.sendPrompt(page, prompt);
 
-      // Drain the stream; streamResponse waits for image loading internally
+      // Drain the stream; use 2× max duration since image generation takes longer
       let finalText = "";
       const images: Array<{ src: string; alt?: string }> = [];
-      const gen = provider.streamResponse(page, baseline);
+      const gen = provider.streamResponse(page, baseline, {
+        maxDurationMs: config.gemini.streamMaxDurationMs * 2,
+        firstChunkTimeoutMs: config.gemini.streamFirstChunkTimeoutMs * 2,
+      });
       let next = await gen.next();
       while (!next.done) {
         next = await gen.next();
