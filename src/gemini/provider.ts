@@ -57,11 +57,15 @@ export class GeminiProvider {
     const mainText = await this.readMainText(page);
     const imageKeys = await this.listVisibleImageKeys(page);
     const imageNodeCount = await this.countImageNodes(page);
-    const providerText = await this.readAssistantText(page);
 
-    if (providerText) {
+    // Count assistant nodes — this is the PRIMARY baseline signal.
+    // readLastMessage will only return content when this count has grown.
+    const assistantCount = await this.countAssistantNodes(page);
+
+    if (assistantCount > 0) {
+      const providerText = await this.readAssistantText(page);
       return {
-        count: await this.countAssistantNodes(page),
+        count: assistantCount,
         lastText: this.sanitize(providerText),
         mainText,
         imageKeys,
@@ -232,27 +236,27 @@ export class GeminiProvider {
   // ── Private helpers ───────────────────────────────────────
 
   private async readLastMessage(page: Page, baseline: ConversationSnapshot): Promise<string> {
-    const providerText = this.sanitize(await this.readAssistantText(page), baseline.prompt);
-    if (providerText && providerText !== baseline.lastText) {
-      if (baseline.lastText && providerText.startsWith(baseline.lastText)) {
-        const newContent = providerText.slice(baseline.lastText.length).trim();
-        if (newContent.length > 5) return newContent;
-        return "";
-      }
-      return providerText;
+    // ── Count-based guard: only return content when a NEW assistant node exists ──
+    const currentCount = await this.countAssistantNodes(page);
+    if (currentCount <= baseline.count) {
+      // No new assistant node has appeared — nothing to return regardless of text.
+      // This prevents returning the old response when the prompt was never sent.
+      return "";
     }
 
+    // A new assistant node exists — read its content.
+    const providerText = this.sanitize(await this.readAssistantText(page), baseline.prompt);
+    if (providerText) return providerText;
+
+    // Fallback: try messageSelectors (generic container approach)
     for (const selector of this.config.messageSelectors) {
       const locator = page.locator(selector);
       const count = await locator.count();
-      if (count === 0) continue;
+      if (count === 0 || count <= baseline.count) continue;
 
-      const index = Math.max(count - 1, baseline.count > 0 ? baseline.count : count - 1);
-      const node = locator.nth(index >= count ? count - 1 : index);
+      // Read the last node (the new one)
+      const node = locator.nth(count - 1);
       const text = this.sanitize((await node.innerText().catch(() => ""))?.trim() ?? "", baseline.prompt);
-      if (!text) continue;
-      if (count === baseline.count && text === baseline.lastText) continue;
-      if (count > baseline.count && text === baseline.lastText) continue;
       if (text) return text;
     }
 
@@ -349,26 +353,47 @@ export class GeminiProvider {
     return selector ? page.locator(selector).first() : null;
   }
 
-  private async ensurePromptSubmitted(page: Page, input: Locator, prompt: string): Promise<void> {
+  private async ensurePromptSubmitted(page: Page, _input: Locator, prompt: string): Promise<void> {
     const normalizedPrompt = prompt.trim();
+
+    // Re-resolve the input locator each time to avoid stale element references.
+    // When the old element is detached, we must check the CURRENT input in the DOM.
     const looksUnsent = async (): Promise<boolean> => {
-      const current = await input
+      // Try the configured input selector first, then fall back to contenteditable
+      const freshInput = await this.firstVisibleLocator(
+        page,
+        [this.config.inputSelector, "rich-textarea div[contenteditable='true']"],
+        1_500,
+      );
+      if (!freshInput) {
+        // No visible input at all — could mean Gemini is processing (input hidden
+        // while generating). Check if Gemini is busy as a positive signal.
+        return false;
+      }
+      const current = await freshInput
         .evaluate((el) => {
           const f = el as { value?: string; textContent?: string | null; innerText?: string };
           return (f.value || f.innerText || f.textContent || "").trim();
         })
         .catch(() => "");
+      // If we got empty string, the input is empty — prompt was likely sent.
+      // If we got the prompt text back, it's still sitting there unsent.
       return Boolean(current) && current.includes(normalizedPrompt);
     };
 
     await sleep(250);
     if (!(await looksUnsent())) return;
 
+    // The prompt is still in the input — try harder to submit it.
     for (const key of ["Control+Enter", "Meta+Enter", "Enter"]) {
       await page.keyboard.press(key).catch(() => undefined);
       await sleep(350);
       if (!(await looksUnsent())) return;
     }
+
+    // Last resort: try submitPrompt strategies again
+    await this.submitPrompt(page);
+    await sleep(500);
   }
 
   private async readLastVisibleText(page: Page, selectors: string[]): Promise<string> {
