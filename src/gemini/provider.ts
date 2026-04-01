@@ -89,7 +89,10 @@ export class GeminiProvider {
     await this.ensureReady(page);
     await this.waitUntilIdle(page, 20_000);
 
-    const input = await this.firstVisibleLocator(page, [this.config.inputSelector, ...this.config.readySelectors], 10_000);
+    // Wait for Angular to finish replacing DOM elements after page load.
+    // We verify the input is STABLE (same element) for two consecutive checks
+    // before trusting it with click+type operations.
+    const input = await this.waitForStableInput(page, 15_000);
     if (!input) throw new Error("Input Gemini non trovato.");
 
     await input.click();
@@ -334,6 +337,49 @@ export class GeminiProvider {
       await sleep(300);
     }
     throw new Error("Gemini occupato; impossibile inviare il prompt.");
+  }
+
+  /**
+   * Waits until the input element is present AND stable — i.e. the same DOM
+   * element is returned on two consecutive checks ~500ms apart.
+   * This protects against Angular's hydration cycle replacing the element
+   * mid-operation (which causes "element was detached" errors).
+   */
+  private async waitForStableInput(page: Page, timeoutMs: number): Promise<import("playwright").Locator | null> {
+    const selectors = [this.config.inputSelector, ...this.config.readySelectors];
+    const deadline = Date.now() + timeoutMs;
+
+    let prevHandle: unknown = null;
+
+    while (Date.now() < deadline) {
+      const selector = await this.findFirstVisible(page, selectors, 5_000);
+      if (!selector) { await sleep(300); continue; }
+
+      const locator = page.locator(selector).first();
+      // Get the underlying JS object handle to compare identity
+      const handle = await locator.evaluateHandle((el) => el).catch(() => null);
+      if (!handle) { await sleep(300); continue; }
+
+      if (prevHandle !== null) {
+        // Compare DOM node identity: same element = stable
+        const isSame = await page.evaluate(
+          ([a, b]) => a === b,
+          [prevHandle, handle] as [unknown, unknown],
+        ).catch(() => false);
+
+        await handle.dispose?.().catch(() => undefined);
+
+        if (isSame) return locator; // stable — same element twice in a row
+        prevHandle = null; // element changed — reset and wait again
+        await sleep(400);
+        continue;
+      }
+
+      prevHandle = handle;
+      await sleep(400);
+    }
+
+    return null;
   }
 
   private async findFirstVisible(page: Page, selectors: string[], timeoutMs: number): Promise<string | null> {
