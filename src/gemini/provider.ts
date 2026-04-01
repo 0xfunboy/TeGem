@@ -94,23 +94,24 @@ export class GeminiProvider {
     if (tagName === "textarea" || tagName === "input") {
       await input.fill(prompt);
     } else {
+      // Clear via JS so we don't need to select-all
       await input.evaluate((el) => {
         (el as { focus?: () => void; textContent: string | null }).focus?.();
         el.textContent = "";
       });
-      // Split on newlines and use Shift+Enter between lines.
-      // page.keyboard.type("\n") dispatches a real keydown(Enter) event which
-      // triggers Gemini's "send on Enter" handler, cutting the message short.
+      // Use locator-scoped pressSequentially / press — safe for parallel pages.
+      // page.keyboard.* is global to the browser process and causes keystroke
+      // collisions when two tabs are being operated simultaneously.
       const lines = prompt.split("\n");
       for (let i = 0; i < lines.length; i++) {
-        if (i > 0) await page.keyboard.press("Shift+Enter");
-        if (lines[i]) await page.keyboard.type(lines[i]);
+        if (i > 0) await input.press("Shift+Enter"); // line break, not submit
+        if (lines[i]) await input.pressSequentially(lines[i], { delay: 0 });
       }
     }
 
-    // Re-focus the input before submitting in case typing caused a blur
+    // Re-focus in case the rich-textarea lost focus during typing
     await input.click().catch(() => undefined);
-    await sleep(100);
+    await sleep(80);
 
     let submitted = false;
 
@@ -127,9 +128,8 @@ export class GeminiProvider {
     }
 
     if (!submitted) {
-      await input.press("Enter").catch(async () => {
-        await page.keyboard.press("Enter");
-      });
+      // input.press is also locator-scoped — safe in parallel
+      await input.press("Enter");
     }
 
     await this.ensurePromptSubmitted(page, input, prompt);
