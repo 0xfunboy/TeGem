@@ -15,9 +15,10 @@ export function makeImagineHandler(
   return async (ctx: CommandContext<Context>): Promise<void> => {
     const args = ctx.match?.trim();
     if (!args) {
-      await ctx.reply("Uso: /imagine <descrizione>\n\nEsempio: `/imagine un tramonto sul mare con colori vividi`", {
-        parse_mode: "Markdown",
-      });
+      await ctx.reply(
+        "Uso: /imagine <descrizione>\n\nEsempio: `/imagine un tramonto sul mare con colori vividi`",
+        { parse_mode: "Markdown" },
+      );
       return;
     }
 
@@ -32,50 +33,58 @@ export function makeImagineHandler(
       await provider.ensureConversationNotFull(page);
 
       const baseline = await provider.snapshotConversation(page);
-      baseline.prompt = `genera un'immagine: ${args}`;
+      const prompt = `genera un'immagine: ${args}`;
+      baseline.prompt = prompt;
 
-      await provider.sendPrompt(page, `genera un'immagine: ${args}`);
+      await provider.sendPrompt(page, prompt);
 
+      // Consume the stream fully
       let finalText = "";
       let images: Array<{ src: string; alt?: string }> = [];
 
-      const stream = provider.streamResponse(page, baseline);
-      let result = await stream.next();
-      while (!result.done) {
-        result = await stream.next();
+      const gen = provider.streamResponse(page, baseline);
+      let next = await gen.next();
+      while (!next.done) {
+        next = await gen.next();
       }
 
-      if (result.done && result.value) {
-        finalText = result.value.text;
-        images = result.value.images;
+      if (next.value) {
+        finalText = next.value.text;
+        images = next.value.images;
+      }
+
+      // If DOM-based image capture returned nothing, try the screenshot fallback
+      if (images.length === 0) {
+        images = await provider.screenshotLastResponse(page);
       }
 
       stopTyping();
 
       if (images.length > 0) {
         for (const img of images) {
-          if (img.src.startsWith("data:")) {
-            const base64 = img.src.split(",")[1];
+          const base64 = img.src.startsWith("data:") ? img.src.split(",")[1] : null;
+          if (base64) {
             const buffer = Buffer.from(base64, "base64");
             await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
-              caption: img.alt || args,
+              caption: finalText.trim() || img.alt || args,
             });
           } else {
-            await ctx.replyWithPhoto(img.src, { caption: img.alt || args });
+            await ctx.replyWithPhoto(img.src, { caption: finalText.trim() || img.alt || args });
           }
         }
-      } else if (finalText) {
+      } else if (finalText.trim()) {
+        // Gemini replied with text only (might have declined image generation)
         await ctx.reply(finalText);
       } else {
         await ctx.reply("Gemini non ha generato immagini. Prova con una descrizione diversa.");
       }
     } catch (err) {
       stopTyping();
-      const message = err instanceof Error ? err.message : String(err);
       if (err instanceof GeminiNotReadyError) {
-        await ctx.reply("Gemini non è pronto. Usa prima /status per verificare la connessione.");
+        await ctx.reply("Gemini non è pronto. Usa /status per verificare la connessione.");
       } else {
-        await ctx.reply(`Errore nella generazione dell'immagine: ${message}`);
+        const message = err instanceof Error ? err.message : String(err);
+        await ctx.reply(`Errore: ${message}`);
       }
     }
   };

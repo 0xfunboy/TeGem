@@ -340,86 +340,109 @@ export class GeminiProvider {
     return "";
   }
 
-  private async hasNewImages(page: Page, baseline: ConversationSnapshot): Promise<boolean> {
-    const seen = new Set(baseline.imageKeys);
-    for (const selector of this.getImageSelectors()) {
-      const locator = page.locator(selector);
-      const count = await locator.count().catch(() => 0);
-      for (let i = Math.max(0, count - 6); i < count; i++) {
-        const node = locator.nth(i);
-        const visible = await node.isVisible().catch(() => false);
-        if (!visible) continue;
-        const box = await node.boundingBox().catch(() => null);
-        if (!box || box.width < 120 || box.height < 120) continue;
-        const src = await node.evaluate((el) => (el as HTMLImageElement).src || "").catch(() => "");
-        if (src && !seen.has(src)) return true;
+  private async hasNewImages(page: Page, _baseline: ConversationSnapshot): Promise<boolean> {
+    // Primary: check for Gemini image-generation custom elements (visible + reasonably sized)
+    for (const selector of ["generated-image", "single-image", ".generated-images"]) {
+      const el = page.locator(selector).last();
+      if (await el.isVisible().catch(() => false)) {
+        const box = await el.boundingBox().catch(() => null);
+        if (box && box.width >= 100 && box.height >= 100) return true;
       }
     }
     return false;
   }
 
+  /**
+   * Capture generated images using Playwright's locator.screenshot() which
+   * works across Shadow DOM boundaries. Falls back to screenshotting the
+   * entire last response container if no specific image elements are found.
+   */
   private async captureImages(page: Page, baseline: ConversationSnapshot): Promise<GeneratedImage[]> {
     const seen = new Set(baseline.imageKeys);
-    return page.evaluate(async (): Promise<GeneratedImage[]> => {
-      type DomLike = { querySelectorAll: (s: string) => unknown[] };
-      type ImgLike = { src?: string; currentSrc?: string; alt?: string; naturalWidth?: number; width?: number; closest?: (s: string) => unknown };
-      type NodeLike = { parentElement?: { closest?: (s: string) => unknown } | null; querySelectorAll?: (s: string) => ImgLike[] };
+    const results: GeneratedImage[] = [];
 
-      const toDataSrc = async (src: string): Promise<string> => {
-        if (!src || src.startsWith("data:")) return src;
-        try {
-          const res = await fetch(src, { credentials: "include" });
-          if (!res.ok) return src;
-          const blob = await res.blob();
-          const buf = await blob.arrayBuffer();
-          const bytes = Array.from(new Uint8Array(buf));
-          return `data:${blob.type || "image/png"};base64,${btoa(bytes.map((v) => String.fromCharCode(v)).join(""))}`;
-        } catch { return src; }
-      };
+    // Priority order: custom elements first (shadow-DOM-safe via locator.screenshot),
+    // then CSS-reachable img elements.
+    const candidates = [
+      "generated-image",
+      "single-image",
+      ".generated-images",
+      "generated-image img[src]",
+      "single-image img[src]",
+      ".generated-images img[src]",
+      ".attachment-container img[src]",
+    ];
 
-      const doc = (globalThis as unknown as { document?: DomLike }).document;
-      if (!doc) return [];
-      const all = Array.from(doc.querySelectorAll("message-content")) as NodeLike[];
-      const topLevel = all.filter((el) => el.parentElement?.closest?.("message-content") === null);
-      const last = topLevel.at(-1);
-      if (!last?.querySelectorAll) return [];
+    for (const selector of candidates) {
+      const locator = page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      if (count === 0) continue;
 
-      const candidates = Array.from(last.querySelectorAll("img[src]"))
-        .map((img) => ({
-          src: img.currentSrc || img.src || "",
-          alt: img.alt || "",
-          score:
-            (img.closest?.(".generated-images, generated-image, single-image, .attachment-container, .image-container") ? 10 : 0) +
-            ((img.naturalWidth || img.width || 0) >= 256 ? 5 : 0),
-        }))
-        .filter((img) => img.src && img.score > 0);
+      for (let i = Math.max(0, count - 4); i < count; i++) {
+        if (results.length >= 4) return results;
 
-      const deduped = new Set<string>();
-      const unique = candidates.filter((img) => {
-        if (deduped.has(img.src)) return false;
-        deduped.add(img.src);
-        return true;
-      }).slice(0, 4);
+        const node = locator.nth(i);
+        if (!(await node.isVisible().catch(() => false))) continue;
 
-      return Promise.all(unique.map(async (img) => ({ src: await toDataSrc(img.src), alt: img.alt || undefined })));
-    }).catch(() => []);
+        const box = await node.boundingBox().catch(() => null);
+        if (!box || box.width < 100 || box.height < 100) continue;
+
+        // Build a dedup key from the img src if available (works even through shadow DOM
+        // because we query the light DOM src attribute on the outer element's child)
+        const src = await node.evaluate((el) => {
+          const img = el.tagName === "IMG" ? el : el.querySelector("img");
+          return (img as HTMLImageElement | null)?.currentSrc || (img as HTMLImageElement | null)?.src || "";
+        }).catch(() => "");
+
+        const dedupeKey = src || `${selector}:${i}:${Math.round(box.width)}x${Math.round(box.height)}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        // locator.screenshot() renders the element as-is, bypassing any shadow DOM limitation
+        const shot = await node.screenshot({ type: "png" }).catch(() => null);
+        if (!shot) continue;
+
+        const alt = await node.evaluate((el) => {
+          const img = el.tagName === "IMG" ? el : el.querySelector("img");
+          return (img as HTMLImageElement | null)?.alt || "";
+        }).catch(() => "");
+
+        results.push({ src: `data:image/png;base64,${shot.toString("base64")}`, alt: alt || undefined });
+      }
+
+      if (results.length > 0) break; // found images at this selector level, stop
+    }
+
+    if (results.length > 0) return results;
+
+    // Last resort: screenshot the whole last response container
+    return this.screenshotLastResponse(page);
   }
 
-  private getImageSelectors(): string[] {
-    return [".generated-images img[src]", "generated-image img[src]", "single-image img[src]", ".attachment-container img[src]"];
+  /** Screenshot the last visible response container as a fallback image capture. */
+  async screenshotLastResponse(page: Page): Promise<GeneratedImage[]> {
+    for (const selector of ["response-container", "message-content", ".presented-response-container"]) {
+      const locator = page.locator(selector).last();
+      if (!(await locator.isVisible().catch(() => false))) continue;
+      const box = await locator.boundingBox().catch(() => null);
+      if (!box || box.width < 100 || box.height < 100) continue;
+      const shot = await locator.screenshot({ type: "png" }).catch(() => null);
+      if (shot) return [{ src: `data:image/png;base64,${shot.toString("base64")}` }];
+    }
+    return [];
   }
 
   private async listVisibleImageKeys(page: Page): Promise<string[]> {
     const keys = new Set<string>();
-    for (const selector of this.getImageSelectors()) {
+    for (const selector of ["generated-image img[src]", "single-image img[src]", ".generated-images img[src]", ".attachment-container img[src]"]) {
       const locator = page.locator(selector);
       const count = await locator.count().catch(() => 0);
       for (let i = 0; i < count; i++) {
         const node = locator.nth(i);
         if (!(await node.isVisible().catch(() => false))) continue;
         const box = await node.boundingBox().catch(() => null);
-        if (!box || box.width < 120 || box.height < 120) continue;
-        const src = await node.evaluate((el) => (el as HTMLImageElement).src || "").catch(() => "");
+        if (!box || box.width < 100 || box.height < 100) continue;
+        const src = await node.evaluate((el) => (el as HTMLImageElement).currentSrc || (el as HTMLImageElement).src || "").catch(() => "");
         if (src) keys.add(src);
       }
     }
@@ -482,19 +505,18 @@ export class GeminiProvider {
 
     cleaned = cleaned.replace(/Gemini Apps Activity[\s\S]*$/i, " ");
     cleaned = cleaned.replace(/^Opens in a new window\s*/i, "");
-    cleaned = cleaned.replace(/^Gemini\s*/i, "");
-    cleaned = cleaned.replace(/^Gemini said\s*/i, "");
-    cleaned = cleaned.replace(/^said\s*/i, "");
-    cleaned = cleaned.replace(/^You said\s*/i, "");
+    // Only strip "Gemini" if it's a standalone line (not part of a sentence)
+    cleaned = cleaned.replace(/^Gemini said[:：]\s*/i, "");
+    cleaned = cleaned.replace(/^You said[:：]\s*/i, "");
     cleaned = cleaned.replace(/^Caricamento di .*$/gim, " ");
     cleaned = cleaned.replace(/Gemini isn['']t human\.[\s\S]*?double-check it\.\s*/i, "");
-    cleaned = cleaned.replace(/Your privacy & Gemini[\s\S]*$/i, " ");
-    cleaned = cleaned.replace(/^Ask Gemini 3\s*/i, "");
-    cleaned = cleaned.replace(/\bCreate image\b/gi, " ");
-    cleaned = cleaned.replace(/\bHelp me learn\b/gi, " ");
-    cleaned = cleaned.replace(/\bBoost my day\b/gi, " ");
+    cleaned = cleaned.replace(/Your privacy & Gemini Apps[\s\S]*$/i, " ");
+    cleaned = cleaned.replace(/^Ask Gemini 3\s*$/im, "");
+    cleaned = cleaned.replace(/^\s*Create image\s*$/gim, "");
+    cleaned = cleaned.replace(/^\s*Help me learn\s*$/gim, "");
+    cleaned = cleaned.replace(/^\s*Boost my day\s*$/gim, "");
 
-    const noiseLines = new Set(["you said", "gemini", "gemini said", "said", "tools", "fast", "ask gemini 3"]);
+    const noiseLines = new Set(["you said", "gemini said", "tools", "fast", "ask gemini 3"]);
 
     cleaned = cleaned
       .split("\n")
