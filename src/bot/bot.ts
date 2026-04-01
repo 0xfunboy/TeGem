@@ -7,7 +7,7 @@ import { GeminiSessionManager } from "../gemini/session.js";
 import { GeminiQuotaError, GeminiTimeoutError } from "../gemini/errors.js";
 import { startTyping } from "./middleware/typing.js";
 import { createAuthMiddleware } from "./middleware/auth.js";
-import { getSessionKey } from "./sessionKey.js";
+import { getSessionKey, getSessionLabel } from "./sessionKey.js";
 import { handleStart } from "./commands/start.js";
 import { handleHelp } from "./commands/help.js";
 import { makeClearHandler } from "./commands/clear.js";
@@ -83,9 +83,10 @@ export function createBot(
     const sentMsg = await ctx.reply("…", replyExtra);
 
     const sessionKey = getSessionKey(ctx);
+    const sessionLabel = getSessionLabel(ctx);
 
     try {
-      const page = await sessionManager.getOrCreate(provider.config, sessionKey);
+      const page = await sessionManager.getOrCreate(provider.config, sessionKey, sessionLabel);
 
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);

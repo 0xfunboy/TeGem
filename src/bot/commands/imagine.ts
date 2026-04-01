@@ -4,7 +4,7 @@ import { InputFile } from "grammy";
 import type { GeminiSessionManager } from "../../gemini/session.js";
 import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
-import { getSessionKey } from "../sessionKey.js";
+import { getSessionKey, getSessionLabel } from "../sessionKey.js";
 import { startTyping } from "../middleware/typing.js";
 
 export function makeImagineHandler(
@@ -24,9 +24,10 @@ export function makeImagineHandler(
 
     const stopTyping = startTyping(ctx);
     const sessionKey = getSessionKey(ctx);
+    const sessionLabel = getSessionLabel(ctx);
 
     try {
-      const page = await sessionManager.getOrCreate(provider.config, sessionKey);
+      const page = await sessionManager.getOrCreate(provider.config, sessionKey, sessionLabel);
 
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
