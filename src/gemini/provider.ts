@@ -168,7 +168,9 @@ export class GeminiProvider {
         stableTicks = (busy && !canSettleWhileBusy) || imageStillLoading ? 0 : stableTicks + 1;
       }
 
-      if (!firstUsefulSignalSeen && Date.now() - startedAt > firstChunkTimeoutMs) {
+      // Only fire the first-chunk timeout when Gemini is completely idle —
+      // if it's still busy (generating image or text), keep waiting up to maxDurationMs.
+      if (!firstUsefulSignalSeen && !busy && Date.now() - startedAt > firstChunkTimeoutMs) {
         throw new GeminiTimeoutError("nessuna risposta entro il timeout iniziale");
       }
 
