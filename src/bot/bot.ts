@@ -45,14 +45,7 @@ export function createBot(
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
 
-      // If the conversation is empty (fresh session or just cleared),
-      // inject the system prompt silently before the first real message.
-      let baseline = await provider.snapshotConversation(page);
-      if (baseline.count === 0) {
-        await provider.injectSystemPrompt(page, config.systemPrompt);
-        baseline = await provider.snapshotConversation(page);
-      }
-
+      const baseline = await provider.snapshotConversation(page);
       baseline.prompt = userText;
       await provider.sendPrompt(page, userText);
 

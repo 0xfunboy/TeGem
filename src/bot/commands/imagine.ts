@@ -31,46 +31,31 @@ export function makeImagineHandler(
       await provider.ensureReady(page);
       await provider.ensureConversationNotFull(page);
 
-      // Inject system prompt silently if this is a fresh conversation
-      let baseline = await provider.snapshotConversation(page);
-      if (baseline.count === 0) {
-        await provider.injectSystemPrompt(page, config.systemPrompt);
-        baseline = await provider.snapshotConversation(page);
-      }
-
+      const baseline = await provider.snapshotConversation(page);
       const prompt = `genera un'immagine: ${args}`;
       baseline.prompt = prompt;
       await provider.sendPrompt(page, prompt);
 
-      // Drain the stream — image responses produce little/no text chunks
+      // Drain the stream; streamResponse waits for image loading internally
       let finalText = "";
+      const images: Array<{ src: string; alt?: string }> = [];
       const gen = provider.streamResponse(page, baseline);
       let next = await gen.next();
       while (!next.done) {
         next = await gen.next();
       }
-      if (next.value) finalText = next.value.text;
-
-      // Primary: download the full-resolution image via Gemini's download button
-      let imageBuffer = await provider.downloadLastImage(page);
-
-      // Fallback: screenshot the last response container
-      if (!imageBuffer) {
-        const screenshots = await provider.screenshotLastResponse(page);
-        if (screenshots.length > 0) {
-          const src = screenshots[0].src;
-          if (src.startsWith("data:")) {
-            imageBuffer = Buffer.from(src.split(",")[1], "base64");
-          }
-        }
+      if (next.value) {
+        finalText = next.value.text ?? "";
+        images.push(...(next.value.images ?? []));
       }
 
       stopTyping();
 
-      if (imageBuffer) {
-        // Send image only (caption = text if present, else the prompt)
+      if (images.length > 0) {
         const caption = finalText.trim() || undefined;
-        await ctx.replyWithPhoto(new InputFile(imageBuffer, "image.png"), { caption });
+        const src = images[0].src;
+        const buf = Buffer.from(src.split(",")[1], "base64");
+        await ctx.replyWithPhoto(new InputFile(buf, "image.png"), { caption });
       } else if (finalText.trim()) {
         // Gemini replied with text only (e.g. declined image generation)
         await ctx.reply(finalText);

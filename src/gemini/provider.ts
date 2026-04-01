@@ -61,7 +61,7 @@ export class GeminiProvider {
     if (providerText) {
       return {
         count: await this.countAssistantNodes(page),
-        lastText: providerText,
+        lastText: this.sanitize(providerText),
         mainText,
         imageKeys,
       };
@@ -155,10 +155,12 @@ export class GeminiProvider {
       if (hasImageSignal) firstUsefulSignalSeen = true;
 
       const busy = await this.isBusy(page);
-      // Gemini può stabilizzarsi anche mentre è ancora "busy" dopo il primo chunk
-      const canSettleWhileBusy = firstUsefulSignalSeen;
+      const imageStillLoading = hasImageSignal && !(await this.isImageLoaded(page));
+      // Gemini può stabilizzarsi anche mentre è ancora "busy" dopo il primo chunk,
+      // ma non deve stabilizzarsi se l'immagine è ancora in caricamento.
+      const canSettleWhileBusy = firstUsefulSignalSeen && !imageStillLoading;
       if (!current || current === previous) {
-        stableTicks = busy && !canSettleWhileBusy ? 0 : stableTicks + 1;
+        stableTicks = (busy && !canSettleWhileBusy) || imageStillLoading ? 0 : stableTicks + 1;
       }
 
       if (!firstUsefulSignalSeen && Date.now() - startedAt > this.geminiConfig.streamFirstChunkTimeoutMs) {
@@ -352,83 +354,61 @@ export class GeminiProvider {
     return false;
   }
 
-  /**
-   * Capture generated images using Playwright's locator.screenshot() which
-   * works across Shadow DOM boundaries. Falls back to screenshotting the
-   * entire last response container if no specific image elements are found.
-   */
-  private async captureImages(page: Page, baseline: ConversationSnapshot): Promise<GeneratedImage[]> {
-    const seen = new Set(baseline.imageKeys);
-    const results: GeneratedImage[] = [];
+  /** Returns true when at least one generated image is fully decoded in the page. */
+  private async isImageLoaded(page: Page): Promise<boolean> {
+    return page.evaluate((): boolean => {
+      const containers = [
+        ...Array.from(document.querySelectorAll("generated-image")),
+        ...Array.from(document.querySelectorAll("single-image")),
+        ...Array.from(document.querySelectorAll(".generated-images")),
+      ];
 
-    // Priority order: custom elements first (shadow-DOM-safe via locator.screenshot),
-    // then CSS-reachable img elements.
-    const candidates = [
-      "generated-image",
-      "single-image",
-      ".generated-images",
-      "generated-image img[src]",
-      "single-image img[src]",
-      ".generated-images img[src]",
-      ".attachment-container img[src]",
-    ];
+      for (const container of containers) {
+        // Light DOM
+        const lightImg = container.querySelector("img") as HTMLImageElement | null;
+        if (lightImg && lightImg.complete && lightImg.naturalWidth > 0) return true;
 
-    for (const selector of candidates) {
-      const locator = page.locator(selector);
-      const count = await locator.count().catch(() => 0);
-      if (count === 0) continue;
-
-      for (let i = Math.max(0, count - 4); i < count; i++) {
-        if (results.length >= 4) return results;
-
-        const node = locator.nth(i);
-        if (!(await node.isVisible().catch(() => false))) continue;
-
-        const box = await node.boundingBox().catch(() => null);
-        if (!box || box.width < 100 || box.height < 100) continue;
-
-        // Build a dedup key from the img src if available (works even through shadow DOM
-        // because we query the light DOM src attribute on the outer element's child)
-        const src = await node.evaluate((el) => {
-          const img = el.tagName === "IMG" ? el : el.querySelector("img");
-          return (img as HTMLImageElement | null)?.currentSrc || (img as HTMLImageElement | null)?.src || "";
-        }).catch(() => "");
-
-        const dedupeKey = src || `${selector}:${i}:${Math.round(box.width)}x${Math.round(box.height)}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-
-        // locator.screenshot() renders the element as-is, bypassing any shadow DOM limitation
-        const shot = await node.screenshot({ type: "png" }).catch(() => null);
-        if (!shot) continue;
-
-        const alt = await node.evaluate((el) => {
-          const img = el.tagName === "IMG" ? el : el.querySelector("img");
-          return (img as HTMLImageElement | null)?.alt || "";
-        }).catch(() => "");
-
-        results.push({ src: `data:image/png;base64,${shot.toString("base64")}`, alt: alt || undefined });
+        // Shadow DOM
+        const shadow = (container as unknown as { shadowRoot?: ShadowRoot }).shadowRoot;
+        if (shadow) {
+          const shadowImg = shadow.querySelector("img") as HTMLImageElement | null;
+          if (shadowImg && shadowImg.complete && shadowImg.naturalWidth > 0) return true;
+        }
       }
 
-      if (results.length > 0) break; // found images at this selector level, stop
-    }
-
-    if (results.length > 0) return results;
-
-    // Last resort: screenshot the whole last response container
-    return this.screenshotLastResponse(page);
+      // Broad fallback: any img nested in image custom elements
+      const allImgs = Array.from(document.querySelectorAll("generated-image img, single-image img")) as HTMLImageElement[];
+      return allImgs.some((img) => img.complete && img.naturalWidth > 0);
+    }).catch(() => false);
   }
 
-  /** Screenshot the last visible response container as a fallback image capture. */
-  async screenshotLastResponse(page: Page): Promise<GeneratedImage[]> {
-    for (const selector of ["response-container", "message-content", ".presented-response-container"]) {
-      const locator = page.locator(selector).last();
-      if (!(await locator.isVisible().catch(() => false))) continue;
-      const box = await locator.boundingBox().catch(() => null);
-      if (!box || box.width < 100 || box.height < 100) continue;
-      const shot = await locator.screenshot({ type: "png" }).catch(() => null);
-      if (shot) return [{ src: `data:image/png;base64,${shot.toString("base64")}` }];
+  /** Polls until at least one generated image is fully loaded or timeout expires. */
+  async waitForImageReady(page: Page, timeoutMs = 45_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.isImageLoaded(page)) return true;
+      await sleep(500);
     }
+    return false;
+  }
+
+  /**
+   * Capture generated images by downloading the actual image file via Gemini's
+   * download button. Waits until the image is fully loaded before attempting.
+   * Never falls back to screenshotting.
+   */
+  private async captureImages(page: Page, baseline: ConversationSnapshot): Promise<GeneratedImage[]> {
+    const hasImage = await this.hasNewImages(page, baseline);
+    if (!hasImage) return [];
+
+    // Wait for image to be fully decoded before clicking download
+    await this.waitForImageReady(page, 45_000);
+
+    const buf = await this.downloadLastImage(page);
+    if (buf) {
+      return [{ src: `data:image/jpeg;base64,${buf.toString("base64")}` }];
+    }
+
     return [];
   }
 
@@ -501,6 +481,9 @@ export class GeminiProvider {
    * Returns null if no image download can be triggered.
    */
   async downloadLastImage(page: Page): Promise<Buffer | null> {
+    // Ensure the image is fully decoded before trying to click the download button
+    await this.waitForImageReady(page, 45_000);
+
     for (const containerSel of ["generated-image", "single-image", ".generated-images"]) {
       const container = page.locator(containerSel).last();
       if (!(await container.isVisible().catch(() => false))) continue;
