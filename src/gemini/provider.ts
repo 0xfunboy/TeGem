@@ -98,7 +98,14 @@ export class GeminiProvider {
         (el as { focus?: () => void; textContent: string | null }).focus?.();
         el.textContent = "";
       });
-      await page.keyboard.type(prompt);
+      // Split on newlines and use Shift+Enter between lines.
+      // page.keyboard.type("\n") dispatches a real keydown(Enter) event which
+      // triggers Gemini's "send on Enter" handler, cutting the message short.
+      const lines = prompt.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) await page.keyboard.press("Shift+Enter");
+        if (lines[i]) await page.keyboard.type(lines[i]);
+      }
     }
 
     let submitted = false;
