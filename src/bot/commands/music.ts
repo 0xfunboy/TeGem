@@ -47,18 +47,30 @@ export function makeMusicHandler(
       while (!next.done) next = await gen.next();
       if (next.value) finalText = next.value.text ?? "";
 
-      // Try to download the generated audio
-      const media = await provider.downloadGeneratedMedia(page, 60_000);
+      const downloads = await provider.downloadGeneratedMusic(page, 90_000);
       stopTyping();
 
-      if (media) {
-        await ctx.replyWithAudio(
-          new InputFile(media.buffer, media.filename),
+      let sentMedia = false;
+
+      if (downloads.video) {
+        sentMedia = true;
+        await ctx.replyWithVideo(
+          new InputFile(downloads.video.buffer, downloads.video.filename),
           { caption: finalText.trim() || undefined, ...replyExtra },
         );
-      } else if (finalText.trim()) {
+      }
+
+      if (downloads.audio) {
+        sentMedia = true;
+        await ctx.replyWithAudio(
+          new InputFile(downloads.audio.buffer, downloads.audio.filename),
+          { caption: downloads.video ? undefined : finalText.trim() || undefined, ...replyExtra },
+        );
+      }
+
+      if (!sentMedia && finalText.trim()) {
         await ctx.reply(finalText, replyExtra);
-      } else {
+      } else if (!sentMedia) {
         await ctx.reply("Gemini did not generate music. Try a different description.", replyExtra);
       }
     } catch (err) {
