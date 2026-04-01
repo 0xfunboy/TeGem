@@ -26,6 +26,7 @@ export interface ConversationSnapshot {
   lastText: string;
   mainText: string;
   imageKeys: string[];
+  imageNodeCount: number;
   prompt?: string;
 }
 

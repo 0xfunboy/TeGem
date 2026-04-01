@@ -10,6 +10,7 @@ import { handleHelp } from "./commands/help.js";
 import { makeClearHandler } from "./commands/clear.js";
 import { makeStatusHandler } from "./commands/status.js";
 import { makeImagineHandler } from "./commands/imagine.js";
+import { makeVoiceHandler } from "./commands/voice.js";
 
 export function createBot(
   config: AppConfig,
@@ -24,6 +25,7 @@ export function createBot(
   bot.command("clear", makeClearHandler(sessionManager, provider, config));
   bot.command("status", makeStatusHandler(sessionManager));
   bot.command("imagine", makeImagineHandler(sessionManager, provider, config));
+  bot.command("voice", makeVoiceHandler(sessionManager, provider));
 
   // ── Message handler ────────────────────────────────────────
   bot.on("message:text", async (ctx) => {
