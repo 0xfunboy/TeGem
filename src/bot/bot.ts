@@ -1,4 +1,5 @@
 import { Bot, InputFile, type Context } from "grammy";
+import type { Message, MessageEntity } from "grammy/types";
 
 import type { AppConfig } from "../config.js";
 import { GeminiProvider } from "../gemini/provider.js";
@@ -13,6 +14,57 @@ import { makeStatusHandler } from "./commands/status.js";
 import { makeImagineHandler } from "./commands/imagine.js";
 import { makeVoiceHandler } from "./commands/voice.js";
 
+/**
+ * Given a message that @mentions the bot, returns the composed prompt:
+ *  - strips @mention(s) from the text
+ *  - if the message is a reply, appends the replied-to text with sender attribution:
+ *      "{question} di {senderName}:\n\n{repliedText}"
+ *  - if mention-only with no reply, returns ""
+ * Returns null if no bot mention is present.
+ */
+function resolveMentionQuestion(
+  text: string,
+  entities: MessageEntity[],
+  botUsername: string,
+  botId: number,
+  replyMsg: Message | undefined,
+): string | null {
+  const isMentioned = entities.some(
+    (e) =>
+      (e.type === "mention" && text.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
+      (e.type === "text_mention" && e.user?.id === botId),
+  );
+  if (!isMentioned) return null;
+
+  // Strip all bot mentions (iterate in reverse to preserve offsets)
+  let question = text;
+  for (const e of [...entities].reverse()) {
+    if (
+      (e.type === "mention" && text.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
+      (e.type === "text_mention" && e.user?.id === botId)
+    ) {
+      question = question.slice(0, e.offset) + question.slice(e.offset + e.length);
+    }
+  }
+  question = question.trim();
+
+  // Include replied-to message context
+  const replyText = replyMsg?.text?.trim() ?? replyMsg?.caption?.trim() ?? "";
+  if (replyText) {
+    if (question) {
+      const sender = replyMsg?.from;
+      let senderName = [sender?.first_name, sender?.last_name].filter(Boolean).join(" ").trim();
+      if (!senderName && sender?.username) senderName = `@${sender.username}`;
+      const attribution = senderName ? ` di ${senderName}` : "";
+      question = `${question}${attribution}:\n\n${replyText}`;
+    } else {
+      question = replyText;
+    }
+  }
+
+  return question;
+}
+
 export function createBot(
   config: AppConfig,
   sessionManager: GeminiSessionManager,
@@ -24,10 +76,6 @@ export function createBot(
   bot.use(createAuthMiddleware(config));
 
   // ── Shared Gemini query helper ─────────────────────────────
-  /**
-   * Sends `text` to Gemini and streams the reply back to Telegram.
-   * In groups, set `replyToMsgId` to thread the response to the user's message.
-   */
   async function runQuery(ctx: Context, text: string, replyToMsgId?: number): Promise<void> {
     const stopTyping = startTyping(ctx);
     const replyExtra = replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
@@ -135,6 +183,9 @@ export function createBot(
     const msg = ctx.message;
     const text = msg.text;
     const chatType = ctx.chat.type;
+    const botUsername = ctx.me.username ?? "";
+    const botId = ctx.me.id;
+    const entities = msg.entities ?? [];
 
     if (chatType === "private") {
       if (text.startsWith("/")) {
@@ -142,72 +193,33 @@ export function createBot(
         return;
       }
 
-      // If the message is just @botname (e.g. user tapped "mention" in reply),
-      // use the replied-to message as the actual question.
-      const botUsername = ctx.me.username;
-      const isMentionOnly =
-        botUsername &&
-        msg.entities?.length === 1 &&
-        msg.entities[0].type === "mention" &&
-        text.trim() === `@${botUsername}`;
+      // If the message contains an @mention of the bot, strip it and compose
+      // the prompt (same logic as group mentions, so reply context works too).
+      const mentionQuestion = resolveMentionQuestion(
+        text, entities, botUsername, botId, msg.reply_to_message,
+      );
 
-      if (isMentionOnly) {
-        const replyMsg = msg.reply_to_message;
-        const replyText = replyMsg?.text?.trim() ?? replyMsg?.caption?.trim() ?? "";
-        if (replyText) {
-          await runQuery(ctx, replyText);
-        } else {
+      if (mentionQuestion !== null) {
+        if (!mentionQuestion) {
           await ctx.reply("Dimmi pure! Cosa vuoi sapere?");
+          return;
         }
+        await runQuery(ctx, mentionQuestion);
         return;
       }
 
+      // No @mention — send the plain text as-is
       await runQuery(ctx, text);
       return;
     }
 
     // Groups / supergroups: only respond when @mentioned
     if (chatType === "group" || chatType === "supergroup") {
-      const botUsername = ctx.me.username;
-      const entities = msg.entities ?? [];
-
-      const isMentioned = entities.some(
-        (e) =>
-          (e.type === "mention" && text.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
-          (e.type === "text_mention" && e.user?.id === ctx.me.id),
+      const question = resolveMentionQuestion(
+        text, entities, botUsername, botId, msg.reply_to_message,
       );
 
-      if (!isMentioned) return;
-
-      // Strip all @botname mentions from the text
-      let question = text;
-      for (const e of [...entities].reverse()) {
-        if (
-          (e.type === "mention" && text.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
-          (e.type === "text_mention" && e.user?.id === ctx.me.id)
-        ) {
-          question = question.slice(0, e.offset) + question.slice(e.offset + e.length);
-        }
-      }
-      question = question.trim();
-
-      // If tagged in a reply, compose the prompt as:
-      //   "{question} di {senderName}:\n\n{repliedText}"
-      // Check .text for text messages and .caption for photo/video messages.
-      const replyMsg = msg.reply_to_message;
-      const replyText = replyMsg?.text?.trim() ?? replyMsg?.caption?.trim() ?? "";
-      if (replyText) {
-        if (question) {
-          // Build sender attribution: prefer "FirstName LastName", fallback to @username
-          const sender = replyMsg?.from;
-          let senderName = [sender?.first_name, sender?.last_name].filter(Boolean).join(" ").trim();
-          if (!senderName && sender?.username) senderName = `@${sender.username}`;
-          const attribution = senderName ? ` di ${senderName}` : "";
-          question = `${question}${attribution}:\n\n${replyText}`;
-        } else {
-          question = replyText;
-        }
-      }
+      if (question === null) return; // not mentioned
 
       if (!question) {
         await ctx.reply("Dimmi pure!", { reply_parameters: { message_id: msg.message_id } });
