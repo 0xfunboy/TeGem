@@ -191,14 +191,22 @@ export function createBot(
       }
       question = question.trim();
 
-      // If tagged in a reply to another message, prepend that context.
+      // If tagged in a reply, compose the prompt as:
+      //   "{question} di {senderName}:\n\n{repliedText}"
       // Check .text for text messages and .caption for photo/video messages.
       const replyMsg = msg.reply_to_message;
       const replyText = replyMsg?.text?.trim() ?? replyMsg?.caption?.trim() ?? "";
       if (replyText) {
-        question = question
-          ? `[Messaggio di riferimento: "${replyText}"]\n\n${question}`
-          : replyText;
+        if (question) {
+          // Build sender attribution: prefer "FirstName LastName", fallback to @username
+          const sender = replyMsg?.from;
+          let senderName = [sender?.first_name, sender?.last_name].filter(Boolean).join(" ").trim();
+          if (!senderName && sender?.username) senderName = `@${sender.username}`;
+          const attribution = senderName ? ` di ${senderName}` : "";
+          question = `${question}${attribution}:\n\n${replyText}`;
+        } else {
+          question = replyText;
+        }
       }
 
       if (!question) {
