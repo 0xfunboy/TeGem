@@ -113,26 +113,53 @@ export class GeminiProvider {
     await input.click().catch(() => undefined);
     await sleep(80);
 
-    let submitted = false;
+    await this.submitPrompt(page);
 
+    await this.ensurePromptSubmitted(page, input, prompt);
+  }
+
+  /**
+   * Submits the currently typed prompt using multiple strategies in order:
+   * 1. Click the send button (re-resolved fresh — never use a potentially stale locator)
+   * 2. Press Enter on the contenteditable rich-textarea (element-scoped, safe in parallel)
+   * 3. Dispatch a real keyboard Enter event via JS on the focused element (last resort)
+   */
+  private async submitPrompt(page: Page): Promise<void> {
+    // Strategy 1: click the send button (fresh locator, not the input that may be stale)
     if (this.config.submitSelector) {
       const submit = page.locator(this.config.submitSelector).first();
-      if (await submit.isVisible().catch(() => false)) {
+      if (await submit.isVisible({ timeout: 2_000 }).catch(() => false)) {
         try {
-          await submit.click({ force: true });
-          submitted = true;
+          await submit.click({ force: true, timeout: 5_000 });
+          return;
         } catch {
-          // fall through to Enter
+          // fall through
         }
       }
     }
 
-    if (!submitted) {
-      // input.press is also locator-scoped — safe in parallel
-      await input.press("Enter");
+    // Strategy 2: Enter on the rich-textarea contenteditable (always fresh locator)
+    const contentEditable = page.locator("rich-textarea div[contenteditable='true']").first();
+    if (await contentEditable.isVisible({ timeout: 2_000 }).catch(() => false)) {
+      try {
+        await contentEditable.press("Enter", { timeout: 5_000 });
+        return;
+      } catch {
+        // fall through
+      }
     }
 
-    await this.ensurePromptSubmitted(page, input, prompt);
+    // Strategy 3: dispatch Enter via JS on whatever element currently has focus
+    await page.evaluate(() => {
+      const el = document.activeElement ?? document.querySelector("[contenteditable='true']");
+      if (!el) return;
+      for (const type of ["keydown", "keypress", "keyup"] as const) {
+        el.dispatchEvent(new KeyboardEvent(type, {
+          key: "Enter", code: "Enter", keyCode: 13, which: 13,
+          bubbles: true, cancelable: true,
+        }));
+      }
+    }).catch(() => undefined);
   }
 
   async *streamResponse(
