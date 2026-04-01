@@ -137,11 +137,31 @@ export function createBot(
     const chatType = ctx.chat.type;
 
     if (chatType === "private") {
-      // Private chat: respond to everything except unknown slash commands
       if (text.startsWith("/")) {
         await ctx.reply("Comando sconosciuto. Usa /help per vedere i comandi disponibili.");
         return;
       }
+
+      // If the message is just @botname (e.g. user tapped "mention" in reply),
+      // use the replied-to message as the actual question.
+      const botUsername = ctx.me.username;
+      const isMentionOnly =
+        botUsername &&
+        msg.entities?.length === 1 &&
+        msg.entities[0].type === "mention" &&
+        text.trim() === `@${botUsername}`;
+
+      if (isMentionOnly) {
+        const replyMsg = msg.reply_to_message;
+        const replyText = replyMsg?.text?.trim() ?? replyMsg?.caption?.trim() ?? "";
+        if (replyText) {
+          await runQuery(ctx, replyText);
+        } else {
+          await ctx.reply("Dimmi pure! Cosa vuoi sapere?");
+        }
+        return;
+      }
+
       await runQuery(ctx, text);
       return;
     }
@@ -171,8 +191,10 @@ export function createBot(
       }
       question = question.trim();
 
-      // If tagged in a reply to another message, prepend that context
-      const replyText = msg.reply_to_message?.text?.trim();
+      // If tagged in a reply to another message, prepend that context.
+      // Check .text for text messages and .caption for photo/video messages.
+      const replyMsg = msg.reply_to_message;
+      const replyText = replyMsg?.text?.trim() ?? replyMsg?.caption?.trim() ?? "";
       if (replyText) {
         question = question
           ? `[Messaggio di riferimento: "${replyText}"]\n\n${question}`
