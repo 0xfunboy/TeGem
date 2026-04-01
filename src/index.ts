@@ -29,13 +29,15 @@ async function main(): Promise<void> {
 
   // Set bot commands for Telegram menu
   await bot.api.setMyCommands([
-    { command: "start", description: "Messaggio di benvenuto" },
-    { command: "help", description: "Lista comandi" },
-    { command: "clear", description: "Nuova conversazione" },
-    { command: "status", description: "Stato del bot" },
-    { command: "imagine", description: "Genera un'immagine" },
-    { command: "q", description: "Fai una domanda (utile nei gruppi)" },
-    { command: "voice", description: "Leggi l'ultima risposta (audio)" },
+    { command: "start", description: "Welcome message" },
+    { command: "help", description: "Command list" },
+    { command: "clear", description: "New conversation" },
+    { command: "status", description: "Bot status" },
+    { command: "q", description: "Ask a question (also works with photos)" },
+    { command: "imagine", description: "Generate an image" },
+    { command: "music", description: "Generate music" },
+    { command: "video", description: "Generate a video" },
+    { command: "voice", description: "Read last response (TTS audio)" },
   ]);
 
   console.log("[TeGem] Bot pronto. In ascolto...");
