@@ -78,6 +78,17 @@ function resolveCaptionQueryCommand(caption: string, botUsername: string): strin
   return match[1]?.trim() || "Describe this image";
 }
 
+function getMediaFileId(message: Message | undefined): string | undefined {
+  if (!message) return undefined;
+  if ("photo" in message && message.photo && message.photo.length > 0) {
+    return message.photo[message.photo.length - 1].file_id;
+  }
+  if ("document" in message && message.document) {
+    return message.document.file_id;
+  }
+  return undefined;
+}
+
 export function createBot(
   config: AppConfig,
   sessionManager: GeminiSessionManager,
@@ -222,23 +233,49 @@ export function createBot(
   bot.command("voice", makeVoiceHandler(sessionManager, provider));
 
   // /q — natural language query, works in both groups and private
-  // Supports photo attachments: send /q with a photo to include it in the prompt
+  // Supports photo attachments and reply-to-media context.
   bot.command("q", async (ctx) => {
     const text = ctx.match?.trim();
-    if (!text) {
+    const repliedMsg = ctx.message?.reply_to_message;
+    const currentFileId = getMediaFileId(ctx.message);
+    const repliedFileId = getMediaFileId(repliedMsg);
+    const fileId = currentFileId ?? repliedFileId;
+
+    if (!text && !fileId) {
       await ctx.reply("Usage: /q <question>\nExample: /q what is the capital of France?\n\nYou can also attach a photo with the command.");
       return;
     }
 
-    // Check if there's a photo attached to this message
     let mediaPath: string | undefined;
-    const photo = ctx.message?.photo;
-    if (photo && photo.length > 0) {
-      const fileId = photo[photo.length - 1].file_id; // highest resolution
+    if (fileId) {
       mediaPath = (await downloadTelegramFile(ctx, fileId)) ?? undefined;
     }
 
-    await runQuery(ctx, text, ctx.message?.message_id, mediaPath);
+    const prompt = text || "Describe this image";
+    const replyTarget = repliedMsg?.message_id ?? ctx.message?.message_id;
+    await runQuery(ctx, prompt, replyTarget, mediaPath);
+  });
+
+  bot.command("vision", async (ctx) => {
+    const repliedMsg = ctx.message?.reply_to_message;
+    const currentFileId = getMediaFileId(ctx.message);
+    const repliedFileId = getMediaFileId(repliedMsg);
+    const fileId = repliedFileId ?? currentFileId;
+
+    if (!fileId) {
+      await ctx.reply("Usage: reply with /vision to a photo or document image, or attach an image with /vision.");
+      return;
+    }
+
+    const mediaPath = await downloadTelegramFile(ctx, fileId);
+    if (!mediaPath) {
+      await ctx.reply("Could not download the file.");
+      return;
+    }
+
+    const prompt = ctx.match?.trim() || "Describe this image in detail.";
+    const replyTarget = repliedMsg?.message_id ?? ctx.message?.message_id;
+    await runQuery(ctx, prompt, replyTarget, mediaPath);
   });
 
   // ── Message handler ────────────────────────────────────────
@@ -307,12 +344,7 @@ export function createBot(
     const botId = ctx.me.id;
 
     // Get the file ID
-    let fileId: string | undefined;
-    if ("photo" in msg && msg.photo && msg.photo.length > 0) {
-      fileId = msg.photo[msg.photo.length - 1].file_id;
-    } else if ("document" in msg && msg.document) {
-      fileId = msg.document.file_id;
-    }
+    const fileId = getMediaFileId(msg);
     if (!fileId) return;
 
     const qPrompt = resolveCaptionQueryCommand(caption, botUsername);

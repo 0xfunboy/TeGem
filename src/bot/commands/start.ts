@@ -9,6 +9,8 @@ export async function handleStart(ctx: CommandContext<Context>): Promise<void> {
     `/help — lista comandi\n` +
     `/clear — nuova conversazione\n` +
     `/status — stato del bot\n` +
+    `/q <domanda> — domanda libera, anche su immagini in reply\n` +
+    `/vision — descrive l'immagine a cui rispondi\n` +
     `/imagine <descrizione> — genera un'immagine`,
     { parse_mode: "Markdown" },
   );
