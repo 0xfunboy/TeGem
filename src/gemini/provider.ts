@@ -769,11 +769,20 @@ export class GeminiProvider {
         }
 
         const uploadTargets = [
+          page.locator('[data-test-id="local-images-files-uploader-button"]').first(),
+          page.locator('button[data-test-id="local-images-files-uploader-button"]').first(),
+          page.locator('button[aria-label*="Upload files"]').first(),
+          page.locator('button[role="menuitem"]').filter({
+            has: page.locator('[data-test-id="local-images-files-uploader-icon"]'),
+          }).first(),
           page.locator('button.mat-mdc-menu-item, button[mat-menu-item]').filter({
-            hasText: /upload|photo|image|file|files|computer|device/i,
+            hasText: /^upload files$/i,
+          }).first(),
+          page.locator('button.mat-mdc-menu-item, button[mat-menu-item]').filter({
+            hasText: /upload files|upload|file|files|computer|device/i,
           }).first(),
           page.locator('div[role="menuitem"], button[role="menuitem"]').filter({
-            hasText: /upload|photo|image|file|files|computer|device/i,
+            hasText: /upload files|upload|file|files|computer|device/i,
           }).first(),
         ];
 
