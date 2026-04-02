@@ -2,113 +2,155 @@
 
 ## Gemini not ready / login required
 
-**Symptom:** Bot replies "Gemini non è pronto. Potrebbe essere necessario effettuare il login."
+Symptom:
 
-**Cause:** No saved Playwright profile, or the Google session has expired.
+- startup warns that Gemini is not ready
+- bot replies with a login/not ready error
 
-**Fix:**
-1. Run `npm run dev` — Chrome will open
-2. Navigate to `gemini.google.com` and log in manually
-3. Once the chat interface is visible, send a message to the bot to trigger session initialization
-4. The profile is saved; subsequent restarts will auto-login
+Likely cause:
 
----
+- expired Google session
+- invalid or missing Chrome profile state
 
-## Bot responds with "Risposta vuota da Gemini"
+Fix:
 
-**Symptom:** Message edited to "Risposta vuota da Gemini. Riprova."
+1. run in headed mode
+2. open Gemini manually in the launched browser
+3. complete login / verification
+4. retry once the input box is visible
 
-**Cause:** DOM polling finished but no text was extracted. Usually happens if:
-- Gemini changed its HTML structure (selectors no longer match)
-- Response was too short to pass the noise filter
-- Gemini produced only an image with no caption
+## `/q` on media is ignored
 
-**Fix:**
-- Check that `gemini.google.com` still uses `message-content` as the response element
-- Try `/clear` to start a fresh conversation
-- Try increasing `STREAM_STABLE_TICKS` in `.env` to give more time
+Symptom:
 
----
+- `/q ...` works as text
+- `/q ...` on an attached image or replied image does nothing
+
+Checks:
+
+- confirm the message is actually a Telegram photo or document
+- if in a group, ensure the message really starts with `/q`
+- restart the bot after deploying command-routing changes
+
+Current supported cases:
+
+- attached image + `/q ...`
+- reply to image + `/q ...`
+- media caption starting with `/q ...`
+
+## Gemini file upload fails
+
+Symptom:
+
+- error like `Upload file Gemini non disponibile`
+- bot opens the `+` menu in Gemini but does not attach the file
+
+Cause:
+
+- Gemini changed the upload menu DOM
+- the hidden file input appears only after clicking `Upload files`
+- Playwright reached the wrong upload target
+
+Fix:
+
+- inspect the real Gemini upload entry in DevTools
+- verify `data-test-id="local-images-files-uploader-button"` still exists
+- if UI changed, update `uploadFile()` selectors in `src/gemini/provider.ts`
+
+## Cross-group / cross-user answer bleed
+
+Symptom:
+
+- one group's request answers using another group's Gemini conversation
+- text or generated media seems to belong to the wrong Telegram thread
+
+Cause:
+
+- duplicate or stale session mappings in `.playwright/profiles/<namespace>/sessions.json`
+
+Fix:
+
+1. inspect `sessions.json`
+2. remove the bad session entry
+3. restart the bot
+4. let the session recreate a fresh Gemini conversation
+
+The runtime now tries to detect duplicate conversation ownership automatically, but already-corrupted local session mappings may still need cleanup.
 
 ## Timeout errors
 
-**Symptom:** "Timeout Gemini: nessuna risposta entro il timeout iniziale"
+Symptom:
 
-**Cause:** Gemini took longer than `STREAM_FIRST_CHUNK_TIMEOUT_MS` (default 25s) to start responding.
+- `Timeout Gemini: ...`
 
-**Fix:**
+Possible causes:
+
+- Gemini took too long to start generating
+- media generation was slower than the configured timeout
+- file upload never completed, so no useful generation started
+
+Fix:
+
 ```env
 STREAM_FIRST_CHUNK_TIMEOUT_MS=45000
 STREAM_MAX_DURATION_MS=120000
 ```
 
----
+Also verify whether the failing request involved image/video/music generation, because those flows are slower by design.
 
-## Quota exhausted
+## Telegram caption too long
 
-**Symptom:** Bot replies "Quota Gemini esaurita per oggi."
+Old symptom:
 
-**Cause:** Your Google account has hit the daily Gemini free-tier limit.
+- media send failed with `message caption is too long`
 
-**Fix:** Wait until the limit resets (usually midnight Pacific Time), or use a different Google account. Update `GEMINI_PROFILE_DIR` in `.env` to point to a profile for the other account.
+Current behavior:
 
----
+- `/music` and `/video` send text separately from the media file
 
-## Chrome not found
+If you still hit this, the problem is likely coming from another media path that still uses captions.
 
-**Symptom:** Error: `browserType.launchPersistentContext: Failed to launch browser`
+## Image generation returns no image
 
-**Fix A — Use system Chrome:**
-```bash
-which google-chrome-stable   # should output a path
-# TeGem auto-detects /usr/bin/google-chrome-stable
-```
+Symptom:
 
-**Fix B — Use Playwright Chromium:**
-```bash
-npm run playwright:install
-```
-Then in `.env`:
-```env
-PLAYWRIGHT_BROWSER_CHANNEL=chromium
-```
+- `/imagine` returns text only
+- or says Gemini did not generate images
 
----
+Possible causes:
 
-## High CPU / memory on server
+- Gemini refused the request
+- image container selector changed
+- hover/download flow failed
 
-**Symptom:** Chrome process consuming excessive resources.
+Fix:
 
-**Cause:** Playwright's persistent context keeps Chrome running continuously.
+- inspect the generated image container in Gemini
+- verify `generated-image`, `single-image`, and download button selectors still exist
+- retry with a simpler prompt
 
-**Fix:**
-- Ensure only one instance of TeGem is running
-- Restart the bot periodically via systemd `RestartSec` or PM2 cron restart
-- On low-memory servers, use `PLAYWRIGHT_HEADLESS=true` with a pre-saved profile
+## `/voice` does not work
 
----
+Status:
 
-## Message too long for Telegram
+- still experimental
 
-**Symptom:** `editMessageText` fails silently, or message appears truncated.
+Likely failure points:
 
-**Cause:** Telegram's message limit is 4096 characters.
+- the more-options menu did not open
+- Gemini's TTS button selector changed
+- audio network capture did not match the real request
 
-**Current behavior:** If `editMessageText` fails, the bot falls back to sending a new message with `ctx.reply()`.
+If `/voice` is business-critical, inspect the current response menu and audio request pattern before changing unrelated parts of the bot.
 
-**Workaround:** Ask Gemini to be more concise, or break your question into parts.
+## High memory usage
 
----
+Cause:
 
-## Image not captured
+- one tab per active session key remains open
 
-**Symptom:** `/imagine` returns text instead of a photo, or "Gemini non ha generato immagini."
+Mitigations:
 
-**Cause:**
-- Gemini generated the image in a container that doesn't match the known selectors
-- The image is too small (< 120×120 px bounding box)
-- Image generation is unavailable for your account/region
-
-**Fix:**
-- Check Chrome's DevTools on the Gemini page to identify the actual image container selector
-- Update `getImageSelectors()` in `src/gemini/provider.ts` with the new selector
+- restart the service periodically
+- clear unused sessions
+- add future tab eviction/LRU if the user base grows

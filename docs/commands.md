@@ -2,94 +2,131 @@
 
 ## `/start`
 
-Sends a welcome message introducing TeGem and listing the available commands.
-
-**Usage:** `/start`
-
----
+Shows a short introduction and the main commands.
 
 ## `/help`
 
-Displays the full list of commands with descriptions.
-
-**Usage:** `/help`
-
----
+Shows the command list.
 
 ## `/clear`
 
-Resets the current Gemini conversation by navigating to a fresh `gemini.google.com/app` page. The Playwright session remains open — only the conversation context is cleared.
+Clears the current Gemini conversation for the current session key.
 
-**Usage:** `/clear`
+Meaning:
 
-**When to use:**
-- The conversation has gone off-topic and you want a clean slate
-- Gemini is in a confused state or not responding as expected
-- You want to reset the system prompt injection
-
----
+- in DM: clears that user's DM Gemini thread
+- in group: clears only that user's Gemini thread for that group
 
 ## `/status`
 
-Shows the current state of the bot and the Gemini Playwright session.
+Shows runtime information for the current session key.
 
-**Usage:** `/status`
+Typical output includes:
 
-**Output includes:**
-- Bot online status
-- Gemini session URL (or "Not connected")
-- Headless mode flag
+- session key
+- stored conversation ID
+- current Gemini page URL if active
+- number of active tabs in the browser context
+- headless status
 
----
+## `/q <question>`
 
-## `/imagine`
+General-purpose query command.
 
-Asks Gemini to generate an image based on a text description. The generated image is captured from the DOM and sent as a Telegram photo.
+Supported modes:
 
-**Usage:** `/imagine <description>`
+- `/q question text`
+- `/q question text` with attached photo/document
+- reply to someone else's photo/document with `/q question text`
+- attached photo/document with caption `/q question text`
+- reply to someone else's image with `/q` and no extra text
 
-**Examples:**
-```
-/imagine a futuristic city at sunset with neon lights
-/imagine a photorealistic cat wearing a space suit
-/imagine an oil painting of mountains at dawn
-```
+If `/q` has media but no text, the fallback prompt is a generic image-description request.
 
-**Notes:**
-- Image generation depends on Gemini's availability for your account
-- If Gemini returns text instead of an image, the text is sent as a message
-- Up to 4 images per response are captured and forwarded
+Reply behavior:
 
----
+- when replying to someone else's media, the bot replies under the original media message
+- the replied media is downloaded from Telegram, uploaded into Gemini, then combined with the prompt
+
+## `/vision [prompt]`
+
+Dedicated image/file analysis command.
+
+Supported modes:
+
+- reply to a photo/document image with `/vision`
+- reply to a photo/document image with `/vision fai OCR e riassumi`
+- attach an image together with `/vision`
+
+Default prompt:
+
+- `Describe this image in detail.`
+
+Use `/vision` when the primary task is visual analysis rather than a general chat query.
+
+## `/imagine <description>`
+
+Asks Gemini to generate an image and forwards the resulting image to Telegram.
+
+Behavior:
+
+- waits longer than normal text requests
+- downloads the generated image via Gemini's UI
+- sends the image back as a Telegram photo
+- if Gemini returns only text, the text is sent instead
+
+## `/music <description>`
+
+Asks Gemini to generate music.
+
+Behavior:
+
+- submits a `Create music: ...` style prompt
+- waits for Gemini's music generation workflow
+- opens Gemini's download menu and tries both outputs:
+  - video
+  - audio-only MP3
+- sends the media files first
+- sends any long text or lyrics as a separate Telegram text message, not as a caption
+
+## `/video <description>`
+
+Asks Gemini to generate a video.
+
+Behavior:
+
+- uses longer generation timeouts than normal chat
+- downloads the generated media
+- sends text separately from the Telegram video message
+
+## `/voice`
+
+Best-effort TTS capture for the most recent Gemini response in the current session.
+
+Important:
+
+- works only if that session already has an active page and recent Gemini response
+- still depends on Gemini's UI structure and remains less reliable than text/image/music/video flows
 
 ## Free-text messages
 
-Any message that is not a command is forwarded to Gemini as a conversation turn. The bot:
+### Private chats
 
-1. Replies immediately with `"Sto elaborando…"` as a placeholder
-2. Sends the message to Gemini and waits for a response
-3. Progressively updates the placeholder message as Gemini types (streaming edit with `▌` cursor)
-4. Finalizes the message with the complete response
+- plain text is sent directly to Gemini
+- attached media with a caption is handled through the media flow
+- media captions using `/q` are treated like command invocations
 
-**First message behavior:** the system prompt is prepended to the first message of each session, giving Gemini its TeGem identity and command list.
+### Groups / supergroups
 
----
+- plain text is ignored unless the bot is mentioned
+- `@TeGemAI_bot ...` in reply to another message includes the replied text as context
+- the bot replies under the original replied-to message when applicable
+- media with caption `/q ...` works without a mention
+- media with caption `@TeGemAI_bot ...` also works
 
-## Command Awareness
+## Access control
 
-TeGem injects a system prompt into Gemini at the start of each conversation. This means Gemini knows:
+If `ALLOWED_USERS` or `ALLOWED_GROUPS` are configured:
 
-- Its name is **TeGem**
-- What commands are available and what they do
-- To explain its capabilities if asked
-
-Example:
-```
-User: What can you do?
-TeGem: I'm TeGem, an AI assistant on Telegram powered by Google Gemini.
-       You can ask me anything, and I also support these commands:
-       /start, /help, /clear, /status, /imagine <description>
-       ...
-```
-
-The system prompt is fully customizable via the `SYSTEM_PROMPT` environment variable in `.env`.
+- unauthorized private users receive a rejection message
+- unauthorized groups are silently ignored

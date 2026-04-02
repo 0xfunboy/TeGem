@@ -2,24 +2,14 @@
 
 ## Prerequisites
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Node.js | ≥ 20 | `node --version` to check |
-| Google Chrome | any recent | or Chromium via `npm run playwright:install` |
-| Google Account | — | must be able to log into gemini.google.com |
-| Telegram Bot Token | — | create one via [@BotFather](https://t.me/BotFather) |
+| Requirement | Notes |
+|---|---|
+| Node.js >= 20 | `node --version` |
+| Chrome or Chromium | system Chrome is auto-detected when possible |
+| Google account | must already be able to use Gemini in the browser |
+| Telegram bot token | create it via `@BotFather` |
 
----
-
-## Step 1 — Create a Telegram Bot
-
-1. Open Telegram and search for `@BotFather`
-2. Send `/newbot` and follow the prompts
-3. Copy the **token** (format: `123456789:AAF...`)
-
----
-
-## Step 2 — Clone and Install
+## 1. Clone and install
 
 ```bash
 git clone git@github.com:0xfunboy/TeGem.git
@@ -27,80 +17,98 @@ cd TeGem
 npm install
 ```
 
-If you want to use the Playwright-managed Chromium instead of system Chrome:
+Optional Playwright browser install:
 
 ```bash
 npm run playwright:install
-# then set in .env:
-# PLAYWRIGHT_BROWSER_CHANNEL=chromium
 ```
 
----
-
-## Step 3 — Configure `.env`
+## 2. Configure `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Minimum required:
+Minimum:
 
 ```env
 TELEGRAM_BOT_TOKEN=123456789:AAF...
 ```
 
-All other settings have sensible defaults. See [configuration reference](../README.md#configuration-reference) for full options.
+Optional allowlist:
 
----
+```env
+ALLOWED_USERS=123456789
+ALLOWED_GROUPS=-1001234567890
+```
 
-## Step 4 — First Run & Gemini Login
+Useful production toggles:
+
+```env
+PLAYWRIGHT_HEADLESS=true
+PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+```
+
+## 3. First run and Gemini login
 
 ```bash
 npm run dev
 ```
 
-On first run:
+Expected startup flow:
 
-1. Chrome opens and navigates to `gemini.google.com`
-2. **Log in with your Google account** in the browser window that appears
-3. Once logged in and the Gemini chat interface is visible, the bot is ready
-4. The session is saved to `.playwright/profiles/` — no re-login needed on restart
+1. the bot launches the persistent browser context
+2. Gemini opens
+3. you log into Google if needed
+4. `ensureReady()` confirms the chat input is usable
+5. the warmup page closes and real per-session pages are created on demand
 
-You should see in the terminal:
+You should then see log lines similar to:
 
-```
-[TeGem] Nessun profilo Gemini salvato. Al primo messaggio si aprirà il browser per il login.
+```text
+[TeGem] Avvio bot Telegram...
+[TeGem] Avvio sessione browser...
+[TeGem] Sessione Gemini attiva.
 [TeGem] Bot pronto. In ascolto...
-[TeGem] @YourBotName in ascolto
 ```
 
----
+## 4. Basic smoke tests
 
-## Step 5 — Test the Bot
+Test in DM:
 
-Send `/start` to your bot in Telegram. Then try:
-
-```
-/help
+```text
+/start
 /status
-Hello, who are you?
-/imagine a neon cyberpunk city at night
+ciao
 ```
 
----
+Test media flows:
 
-## Production Build
+```text
+/q spiega questa immagine   (with attached image)
+/vision                      (reply to an image)
+/imagine un tramonto synthwave
+/music dark ambient industrial track
+/video a robot walking in rain
+```
+
+Test group behavior:
+
+- send a normal message without mention: bot should ignore it
+- reply to someone with `@BotUsername contesta questo`
+- reply to someone else's image with `/q fai OCR`
+- reply to someone else's image with `/vision`
+
+## 5. Production build
 
 ```bash
-npm run build   # compiles TypeScript to dist/
-npm start       # runs dist/index.js
+npm run build
+npm start
 ```
 
----
+## Headless server deployment
 
-## Headless Server (VPS / Docker)
-
-### Option A — Xvfb virtual display
+### Option A: Xvfb
 
 ```bash
 sudo apt-get install -y xvfb fonts-liberation libgbm1
@@ -109,26 +117,13 @@ export DISPLAY=:99
 PLAYWRIGHT_HEADLESS=false npm start
 ```
 
-### Option B — Copy a saved profile
+### Option B: pre-seeded profile
 
-1. On your local machine, run TeGem once and log in to Gemini
-2. Copy `.playwright/` to the server:
-   ```bash
-   scp -r .playwright/ user@server:/path/to/TeGem/
-   ```
-3. On the server, set `PLAYWRIGHT_HEADLESS=true` and start the bot
+1. log into Gemini once on a machine with UI
+2. copy `.playwright/` to the server
+3. run with `PLAYWRIGHT_HEADLESS=true`
 
-### Option C — True headless (experimental)
-
-```env
-PLAYWRIGHT_HEADLESS=true
-```
-
-Works only if you already have a saved profile with a valid Gemini session. Headless Chrome may be detected by Google and trigger re-authentication.
-
----
-
-## Keeping the Bot Running
+## Keeping the bot alive
 
 ### systemd
 
@@ -158,3 +153,9 @@ pm2 start dist/index.js --name tegem
 pm2 save
 pm2 startup
 ```
+
+## Operational notes
+
+- the Chrome profile is shared, but Gemini pages are separated per session key
+- `sessions.json` stores sessionKey → conversationUrl mappings
+- if you change bot behavior around session identity, old mappings in `sessions.json` may need manual cleanup

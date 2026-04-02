@@ -2,115 +2,128 @@
 
 ## Overview
 
-TeGem is structured in three layers:
+TeGem is organized around four runtime concerns:
 
-```
-┌─────────────────────────────┐
-│       Telegram Layer         │  grammY bot, commands, streaming edits
-├─────────────────────────────┤
-│       Gemini Provider        │  DOM polling, text extraction, image capture
-├─────────────────────────────┤
-│     Playwright Session       │  persistent Chrome context, profile management
-└─────────────────────────────┘
+```text
+┌──────────────────────────────┐
+│ Telegram Layer               │  grammY routing, commands, auth, reply threading
+├──────────────────────────────┤
+│ Session Routing Layer        │  sessionKey → Playwright Page, mutex, persistence
+├──────────────────────────────┤
+│ Gemini Provider Layer        │  DOM automation, uploads, downloads, streaming
+├──────────────────────────────┤
+│ Browser / Storage Layer      │  persistent Chrome profile + sessions.json
+└──────────────────────────────┘
 ```
 
 ## Telegram Layer (`src/bot/`)
 
-Handles all Telegram interaction via [grammY](https://grammy.dev/):
+Main responsibilities:
 
-- **`bot.ts`** — registers commands and the main text handler. For each incoming message it:
-  1. Sends an immediate placeholder reply (`"Sto elaborando…"`)
-  2. Delegates to `GeminiProvider` for the actual response
-  3. Progressively edits the placeholder as streaming chunks arrive
-  4. Sends any generated images as `InputFile` photo messages
+- command registration
+- group mention parsing
+- reply-thread targeting
+- media-aware `/q` and `/vision`
+- allowlist enforcement
+- progressive Telegram message edits during generation
 
-- **`commands/`** — each command is a standalone handler function, keeping `bot.ts` clean
+Key files:
 
-- **`middleware/typing.ts`** — repeatedly calls `sendChatAction("typing")` every 4 seconds while Gemini is working, so Telegram shows the typing indicator
+- `src/bot/bot.ts`
+- `src/bot/sessionKey.ts`
+- `src/bot/middleware/auth.ts`
+- `src/bot/middleware/typing.ts`
+- `src/bot/commands/*.ts`
 
-## Gemini Provider (`src/gemini/provider.ts`)
+### Message routing
 
-The core of TeGem. Drives `gemini.google.com` through Playwright's Page API.
+- private chat plain text goes straight to Gemini
+- group plain text is ignored unless the bot is mentioned
+- `/q` is command-driven and can use:
+  - attached media on the command message
+  - media from the replied-to message
+- `/vision` is a dedicated media-analysis command for replied or attached media
+- mention replies in groups answer under the original replied-to message, not under the tagging message
 
-### Sending a prompt
+## Session Routing Layer (`src/gemini/session.ts`)
 
-```
-ensureReady()          wait for rich-textarea to be visible
-waitUntilIdle()        wait for any previous response to finish
-input.click()
-page.keyboard.type()   type prompt into contenteditable
-submit.click()         click Send button (or press Enter)
-ensurePromptSubmitted() verify textarea is cleared (Gemini-specific validation)
-```
+`GeminiSessionManager` keeps one Playwright `Page` per session key and one shared `BrowserContext`.
 
-### Streaming a response
+### Session keys
 
-```
-snapshotConversation()   baseline: message count, last text, image srcs
-loop every 700ms:
-  readAssistantText()    evaluate JS in browser → find top-level message-content
-  compare with previous  if changed, yield delta to bot layer
-  isBusy()              check for Stop button
-  stable ticks          exit loop after 4 consecutive unchanged reads
-finalizeMessage()        one last read after loop exits
-captureImages()          extract generated images as base64 data URIs
-```
+- private chat: `user_<telegramUserId>`
+- group chat: `group_<chatId>_user_<userId>`
 
-### DOM selectors (Gemini-specific)
+This means:
 
-| Purpose | Selector |
-|---|---|
-| Input field | `rich-textarea div[contenteditable='true']` |
-| Submit button | `button[aria-label*='Send']` (+ variants) |
-| Busy indicator | `button[aria-label*='Stop']` |
-| Response text | `message-content` (top-level only) |
-| Generated images | `.generated-images img`, `generated-image img`, `single-image img` |
+- each user has their own Gemini conversation in DM
+- each user has their own Gemini conversation inside each group
+- two users in the same group do not share a Gemini thread
 
-### Text sanitization
+### Concurrency model
 
-Gemini's DOM includes UI chrome (nav text, watermarks, noise lines) mixed with response text. `sanitize()` removes known patterns like:
+- one mutex per session key via `withLock()`
+- prompts for the same session are serialized
+- different session keys can run in parallel
 
-- `"Gemini Apps Activity"` and everything after
-- `"You said"`, `"Gemini said"` prefixes
-- Italian loading text (`"Caricamento di …"`)
-- One-word noise lines (`"gemini"`, `"tools"`, `"fast"`, `"said"`)
+### Persistence model
 
-## Session Manager (`src/gemini/session.ts`)
+Conversation URLs are stored in `sessions.json` via `ConversationStore`.
 
-Wraps Playwright's `chromium.launchPersistentContext()`:
+When Gemini turns `https://gemini.google.com/app` into `https://gemini.google.com/app/<conversationId>`, the new conversation URL is saved and later restored on restart.
 
-- **Profile persistence**: saves cookies/localStorage to `.playwright/profiles/<namespace>/<profileDir>/`
-- **Single context**: one `BrowserContext` = one Chrome window per profile
-- **Alive check**: detects closed pages/contexts and clears stale sessions
-- **Deduplication**: concurrent launch requests for the same profile share one `Promise`
+The session manager also guards against duplicate conversation ownership: if the same Gemini conversation ID is seen under two different session keys, the duplicate mapping is ignored and the new session is forced to start from a fresh conversation.
 
-## Configuration Flow
+## Gemini Provider Layer (`src/gemini/provider.ts`)
 
-```
-.env file
-   │
-   ▼
-loadConfig()  (src/config.ts)
-   │
-   ├── AppConfig.telegram.token   → grammY Bot
-   ├── AppConfig.gemini           → GeminiSessionManager
-   ├── AppConfig.geminiProvider   → GeminiProvider (selectors, URLs)
-   ├── AppConfig.profileDir       → which Playwright profile to use
-   └── AppConfig.systemPrompt     → injected into Gemini on session start
-```
+`GeminiProvider` is the DOM automation engine.
 
-## System Prompt & Command Awareness
+Primary capabilities:
 
-On the **first message** of each Gemini session, the user's text is prefixed with the system prompt:
+- `ensureReady()` waits for the Gemini input to be usable
+- `sendPrompt()` types and submits prompts
+- `streamResponse()` polls the DOM and yields text deltas
+- `uploadFile()` attaches local files to the current Gemini prompt
+- `captureImages()` downloads Gemini-generated images
+- `downloadGeneratedMusic()` downloads both the music video and MP3 variants
+- `downloadGeneratedMedia()` handles generated video/audio cases exposed directly in the DOM
+- `downloadLastResponseAudio()` attempts Gemini TTS capture for `/voice`
 
-```
-<systemPrompt>
+### Streaming flow
 
----
-
-<userMessage>
+```text
+snapshotConversation()
+sendPrompt()
+loop:
+  readLastMessage()
+  detect busy / stable state
+  yield text deltas
+finalizeMessage()
+capture generated media if present
 ```
 
-This gives Gemini its identity as "TeGem" and injects the command list so it can describe itself accurately when users ask. Subsequent messages in the same session are sent as-is, relying on Gemini's conversation memory.
+### Upload flow
 
-The system prompt is fully configurable via the `SYSTEM_PROMPT` environment variable.
+`uploadFile()` now supports multiple Gemini UI variants:
+
+- direct `input[type="file"]`
+- plus / attach button first, then file input
+- menu path through "Upload files"
+- `filechooser`-driven upload flows
+
+After attaching, it waits for a visible attachment preview before submitting the prompt.
+
+## Browser / Storage Layer
+
+The browser layer is one persistent Chrome profile:
+
+- profile root: `.playwright/profiles/<namespace>/_shared/`
+- session mapping file: `.playwright/profiles/<namespace>/sessions.json`
+
+This design keeps Google login state persistent while allowing many Gemini tabs, one for each Telegram session key.
+
+## Current Design Notes
+
+- `SYSTEM_PROMPT` still exists in config, but the current runtime flow does not inject it into Gemini automatically
+- `/music` and `/video` intentionally send generated text separately from Telegram media messages to avoid caption-length failures
+- `/voice` remains best-effort and should still be treated as experimental
