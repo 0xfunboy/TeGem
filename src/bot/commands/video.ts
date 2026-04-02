@@ -54,11 +54,13 @@ export function makeVideoHandler(
       if (media) {
         await ctx.replyWithVideo(
           new InputFile(media.buffer, media.filename),
-          { caption: finalText.trim() || undefined, ...replyExtra },
+          replyExtra,
         );
-      } else if (finalText.trim()) {
+      }
+
+      if (finalText.trim()) {
         await ctx.reply(finalText, replyExtra);
-      } else {
+      } else if (!media) {
         await ctx.reply("Gemini did not generate a video. Try a different description.", replyExtra);
       }
     } catch (err) {
