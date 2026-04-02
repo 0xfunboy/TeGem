@@ -34,6 +34,7 @@ async function main(): Promise<void> {
     { command: "clear", description: "New conversation" },
     { command: "status", description: "Bot status" },
     { command: "q", description: "Ask a question (also works with photos)" },
+    { command: "vision", description: "Describe a replied image" },
     { command: "imagine", description: "Generate an image" },
     { command: "music", description: "Generate music" },
     { command: "video", description: "Generate a video" },
