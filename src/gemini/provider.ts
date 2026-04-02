@@ -751,22 +751,56 @@ export class GeminiProvider {
    * Gemini accepts images, audio, video, PDFs, etc.
    */
   async uploadFile(page: Page, filePath: string): Promise<void> {
-    // Gemini uses a hidden file input inside the attachment mechanism.
-    // We set the file on the input[type=file] element directly.
-    const fileInput = page.locator('input[type="file"]').first();
+    await this.ensureReady(page);
 
-    // If the file input isn't in the DOM yet, click the "+" button to trigger it
-    if (!(await fileInput.count().catch(() => 0))) {
-      const addBtn = page.locator('button[aria-label*="Add"], button:has(mat-icon[fonticon="add"])').first();
-      if (await addBtn.isVisible().catch(() => false)) {
-        await addBtn.click({ force: true });
+    const attachedDirectly = await this.trySetInputFiles(page, filePath);
+    if (!attachedDirectly) {
+      const attachmentButtons = await this.findAttachmentButtons(page);
+
+      let attached = false;
+
+      for (const button of attachmentButtons) {
+        await button.click({ force: true }).catch(() => undefined);
         await sleep(500);
+
+        if (await this.trySetInputFiles(page, filePath)) {
+          attached = true;
+          break;
+        }
+
+        const uploadTargets = [
+          page.locator('button.mat-mdc-menu-item, button[mat-menu-item]').filter({
+            hasText: /upload|photo|image|file|files|computer|device/i,
+          }).first(),
+          page.locator('div[role="menuitem"], button[role="menuitem"]').filter({
+            hasText: /upload|photo|image|file|files|computer|device/i,
+          }).first(),
+        ];
+
+        for (const target of uploadTargets) {
+          if (!(await target.isVisible({ timeout: 1_500 }).catch(() => false))) continue;
+          if (await this.tryChooseFiles(page, target, filePath)) {
+            attached = true;
+            break;
+          }
+          if (await this.trySetInputFiles(page, filePath)) {
+            attached = true;
+            break;
+          }
+        }
+
+        if (attached) break;
+
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await sleep(200);
+      }
+
+      if (!attached) {
+        throw new Error("Upload file Gemini non disponibile: input file non trovato.");
       }
     }
 
-    await fileInput.setInputFiles(filePath);
-    // Wait for the upload preview to appear
-    await sleep(2_000);
+    await this.waitForAttachmentPreview(page);
   }
 
   async downloadGeneratedMusic(page: Page, timeoutMs = 120_000): Promise<GeneratedMusicDownloads> {
@@ -930,6 +964,105 @@ export class GeminiProvider {
     } catch {
       return null;
     }
+  }
+
+  private async trySetInputFiles(page: Page, filePath: string): Promise<boolean> {
+    const candidates = [
+      page.locator('input[type="file"]').last(),
+      page.locator('input[type="file"][accept]').last(),
+      page.locator('input[type="file"][multiple]').last(),
+    ];
+
+    for (const input of candidates) {
+      if ((await input.count().catch(() => 0)) === 0) continue;
+      try {
+        await input.setInputFiles(filePath, { timeout: 5_000 });
+        return true;
+      } catch {
+        continue;
+      }
+    }
+
+    return false;
+  }
+
+  private async findAttachmentButtons(page: Page): Promise<Locator[]> {
+    const selectors = [
+      'button[aria-label*="Add"]',
+      'button[aria-label*="Upload"]',
+      'button[aria-label*="Attach"]',
+      'button[aria-label*="photo" i]',
+      'button[aria-label*="file" i]',
+      'button[aria-label*="image" i]',
+      'button[mattooltip*="Add"]',
+      'button[mattooltip*="Upload"]',
+      'button[mattooltip*="Attach"]',
+      'button:has(mat-icon[fonticon="add"])',
+      'button:has(mat-icon[fonticon="attach_file"])',
+      'button:has(mat-icon[fonticon="upload_file"])',
+      'button:has(mat-icon[fonticon="image"])',
+    ];
+
+    const buttons: Locator[] = [];
+    for (const selector of selectors) {
+      const locator = page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const button = locator.nth(i);
+        if (await button.isVisible({ timeout: 500 }).catch(() => false)) {
+          buttons.push(button);
+        }
+      }
+    }
+
+    const textMatches = page.locator("button").filter({
+      hasText: /add files|upload files|photos and files|upload|attach|image|photo/i,
+    });
+    const extraCount = await textMatches.count().catch(() => 0);
+    for (let i = 0; i < extraCount; i++) {
+      const button = textMatches.nth(i);
+      if (await button.isVisible({ timeout: 500 }).catch(() => false)) {
+        buttons.push(button);
+      }
+    }
+
+    return buttons;
+  }
+
+  private async tryChooseFiles(page: Page, target: Locator, filePath: string): Promise<boolean> {
+    try {
+      const [chooser] = await Promise.all([
+        page.waitForEvent("filechooser", { timeout: 5_000 }),
+        target.click({ force: true }),
+      ]);
+      await chooser.setFiles(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async waitForAttachmentPreview(page: Page, timeoutMs = 15_000): Promise<void> {
+    const previewSelectors = [
+      '.attachment-container',
+      '[data-test-id*="attachment"]',
+      '[aria-label*="Remove attachment"]',
+      'img[src^="blob:"]',
+      'video[src^="blob:"]',
+      'audio[src^="blob:"]',
+      'button[aria-label*="Remove file"]',
+    ];
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const selector of previewSelectors) {
+        const locator = page.locator(selector).last();
+        if (await locator.isVisible().catch(() => false)) return;
+      }
+      await sleep(300);
+    }
+
+    await sleep(1_000);
   }
 
   private async triggerDownloadWithMeta(

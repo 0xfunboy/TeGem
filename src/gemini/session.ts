@@ -117,16 +117,27 @@ export class GeminiSessionManager {
     this.trackConversationUrl(page, sessionKey, label ?? sessionKey, provider.baseUrl);
 
     const stored = this.store.get(sessionKey);
-    if (stored) {
+    const duplicateOwner = stored
+      ? this.store.findSessionKeyByConversationId(stored.conversationId, sessionKey)
+      : undefined;
+
+    if (stored && !duplicateOwner) {
       console.log(`[Session] Restoring ${sessionKey} → ${stored.conversationUrl}`);
       // Use "load" (not just "domcontentloaded") so Angular has time to bootstrap.
       // Then wait for networkidle so hydration XHR calls complete before we return.
       await page.goto(stored.conversationUrl, { waitUntil: "load", timeout: 30_000 });
       await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
     } else {
+      if (stored && duplicateOwner) {
+        console.warn(
+          `[Session] Duplicate conversation detected for ${sessionKey} and ${duplicateOwner}; starting a fresh conversation.`,
+        );
+        this.store.delete(sessionKey);
+      }
       console.log(`[Session] New session for ${sessionKey}`);
       await page.goto(provider.baseUrl, { waitUntil: "load", timeout: 30_000 });
       await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
+      await this.ensureFreshConversation(page, provider, sessionKey);
     }
 
     return page;
@@ -184,6 +195,13 @@ export class GeminiSessionManager {
       const match = url.match(/\/app\/([a-f0-9]{8,})/i);
       if (!match) return;
       const conversationId = match[1];
+      const duplicateOwner = this.store.findSessionKeyByConversationId(conversationId, sessionKey);
+      if (duplicateOwner) {
+        console.warn(
+          `[Session] Ignoring conversation ${conversationId} for ${sessionKey}; already owned by ${duplicateOwner}.`,
+        );
+        return;
+      }
       const existing = this.store.get(sessionKey);
       if (existing?.conversationId === conversationId) return; // already stored
       const session: StoredSession = {
@@ -249,5 +267,60 @@ export class GeminiSessionManager {
 
     this.context = context;
     return context;
+  }
+
+  private async ensureFreshConversation(
+    page: Page,
+    provider: GeminiProviderConfig,
+    sessionKey: string,
+  ): Promise<void> {
+    const currentConversationId = this.extractConversationId(page.url());
+    if (!currentConversationId) return;
+
+    const owner = this.store.findSessionKeyByConversationId(currentConversationId, sessionKey);
+    console.warn(
+      owner
+        ? `[Session] ${sessionKey} landed on ${owner}'s conversation ${currentConversationId}; forcing new chat.`
+        : `[Session] ${sessionKey} landed on an existing conversation ${currentConversationId}; forcing new chat.`,
+    );
+
+    await this.startNewConversation(page, provider);
+  }
+
+  private async startNewConversation(page: Page, provider: GeminiProviderConfig): Promise<void> {
+    const currentUrl = page.url();
+    const controls = [
+      page.locator('button[aria-label*="New chat"]').first(),
+      page.locator('a[aria-label*="New chat"]').first(),
+      page.locator('button[mattooltip*="New chat"]').first(),
+      page.locator('button').filter({ hasText: /new chat|new conversation/i }).first(),
+      page.locator('[role="button"]').filter({ hasText: /new chat|new conversation/i }).first(),
+      page.locator('button:has(mat-icon[fonticon="add"])').first(),
+    ];
+
+    for (const control of controls) {
+      if (!(await control.isVisible({ timeout: 1_500 }).catch(() => false))) continue;
+      await control.click({ force: true }).catch(() => undefined);
+
+      const changed = await page.waitForURL(
+        (url) => {
+          const value = String(url);
+          return value !== currentUrl || !/\/app\/[a-f0-9]{8,}/i.test(value);
+        },
+        { timeout: 5_000 },
+      ).then(() => true).catch(() => false);
+      if (changed) return;
+
+      // Some Gemini layouts clear the page without changing the URL immediately.
+      const inputReady = await page.locator(provider.inputSelector).first().isVisible({ timeout: 2_000 }).catch(() => false);
+      if (inputReady) return;
+    }
+
+    throw new Error("Impossibile creare una nuova conversazione Gemini isolata.");
+  }
+
+  private extractConversationId(url: string): string | null {
+    const match = url.match(/\/app\/([a-f0-9]{8,})/i);
+    return match?.[1] ?? null;
   }
 }

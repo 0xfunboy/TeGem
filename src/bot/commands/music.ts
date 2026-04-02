@@ -56,7 +56,7 @@ export function makeMusicHandler(
         sentMedia = true;
         await ctx.replyWithVideo(
           new InputFile(downloads.video.buffer, downloads.video.filename),
-          { caption: finalText.trim() || undefined, ...replyExtra },
+          replyExtra,
         );
       }
 
@@ -64,11 +64,11 @@ export function makeMusicHandler(
         sentMedia = true;
         await ctx.replyWithAudio(
           new InputFile(downloads.audio.buffer, downloads.audio.filename),
-          { caption: downloads.video ? undefined : finalText.trim() || undefined, ...replyExtra },
+          replyExtra,
         );
       }
 
-      if (!sentMedia && finalText.trim()) {
+      if (finalText.trim()) {
         await ctx.reply(finalText, replyExtra);
       } else if (!sentMedia) {
         await ctx.reply("Gemini did not generate music. Try a different description.", replyExtra);

@@ -28,6 +28,14 @@ export class ConversationStore {
     return this.data[sessionKey];
   }
 
+  findSessionKeyByConversationId(conversationId: string, excludeSessionKey?: string): string | undefined {
+    for (const [sessionKey, session] of Object.entries(this.data)) {
+      if (sessionKey === excludeSessionKey) continue;
+      if (session.conversationId === conversationId) return sessionKey;
+    }
+    return undefined;
+  }
+
   set(sessionKey: string, session: StoredSession): void {
     this.data[sessionKey] = session;
     this.save();
