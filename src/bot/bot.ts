@@ -68,6 +68,16 @@ function resolveMentionQuestion(
   return question;
 }
 
+function resolveCaptionQueryCommand(caption: string, botUsername: string): string | null {
+  const trimmed = caption.trim();
+  if (!trimmed) return null;
+
+  const match = trimmed.match(new RegExp(`^/q(?:@${botUsername})?(?:\\s+([\\s\\S]*))?$`, "i"));
+  if (!match) return null;
+
+  return match[1]?.trim() || "Describe this image";
+}
+
 export function createBot(
   config: AppConfig,
   sessionManager: GeminiSessionManager,
@@ -305,9 +315,10 @@ export function createBot(
     }
     if (!fileId) return;
 
+    const qPrompt = resolveCaptionQueryCommand(caption, botUsername);
+
     if (chatType === "private") {
-      // In private: always process photos, use caption as prompt
-      const prompt = caption || "Describe this image";
+      const prompt = qPrompt || caption || "Describe this image";
       const mediaPath = await downloadTelegramFile(ctx, fileId);
       if (!mediaPath) {
         await ctx.reply("Could not download the file.");
@@ -319,6 +330,16 @@ export function createBot(
 
     // In groups: only respond if @mentioned in the caption
     if (chatType === "group" || chatType === "supergroup") {
+      if (qPrompt) {
+        const mediaPath = await downloadTelegramFile(ctx, fileId);
+        if (!mediaPath) {
+          await ctx.reply("Could not download the file.", { reply_parameters: { message_id: msg.message_id } });
+          return;
+        }
+        await runQuery(ctx, qPrompt, msg.message_id, mediaPath);
+        return;
+      }
+
       const isMentioned = entities.some(
         (e) =>
           (e.type === "mention" && caption.slice(e.offset, e.offset + e.length) === `@${botUsername}`) ||
