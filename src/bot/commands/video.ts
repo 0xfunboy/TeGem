@@ -60,7 +60,8 @@ export function makeVideoHandler(
       }
 
       if (finalText.trim()) {
-        await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML", ...replyExtra }).catch(async () =>
+        const formatted = await provider.readFormattedAssistantText(page) || formatForTelegram(finalText);
+        await ctx.reply(formatted, { parse_mode: "HTML", ...replyExtra }).catch(async () =>
           ctx.reply(finalText, replyExtra),
         );
       } else if (!media) {

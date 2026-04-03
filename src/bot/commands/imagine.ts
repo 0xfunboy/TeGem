@@ -63,7 +63,8 @@ export function makeImagineHandler(
         const buf = Buffer.from(src.split(",")[1], "base64");
         await ctx.replyWithPhoto(new InputFile(buf, "image.png"), { caption });
       } else if (finalText.trim()) {
-        await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML" }).catch(async () =>
+        const formatted = await provider.readFormattedAssistantText(page) || formatForTelegram(finalText);
+        await ctx.reply(formatted, { parse_mode: "HTML" }).catch(async () =>
           ctx.reply(finalText),
         );
       } else {
