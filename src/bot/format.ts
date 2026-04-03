@@ -13,6 +13,17 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+const TELEGRAM_BIDI_AND_FORMATTING_RE = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/gu;
+const TELEGRAM_UNSAFE_CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
+const TELEGRAM_NON_RENDERING_TEXT_RE = /[\p{White_Space}\p{Cc}\p{Cf}]+/gu;
+
+export function sanitizeTelegramDisplayText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(TELEGRAM_BIDI_AND_FORMATTING_RE, "")
+    .replace(TELEGRAM_UNSAFE_CONTROL_RE, "");
+}
+
 /**
  * Converts Gemini's response text (typically markdown-flavored) to Telegram HTML.
  *
@@ -28,6 +39,8 @@ function escapeHtml(text: string): string {
  *  - Links [text](url)
  */
 export function formatForTelegram(text: string): string {
+  text = sanitizeTelegramDisplayText(text);
+
   // ── Step 1: Extract code blocks to protect them from further processing ──
   const codeBlocks: string[] = [];
   let processed = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang: string, code: string) => {
@@ -79,6 +92,20 @@ export function formatForTelegram(text: string): string {
   processed = processed.replace(/\x00IC(\d+)\x00/g, (_match, idx: string) => inlineCodes[Number(idx)]);
 
   return processed.trim();
+}
+
+/**
+ * Returns true when Telegram can render at least one visible character.
+ * Controls such as bidi overrides and zero-width marks are treated as empty.
+ */
+export function hasVisibleTelegramText(text: string): boolean {
+  return sanitizeTelegramDisplayText(text).replace(TELEGRAM_NON_RENDERING_TEXT_RE, "").length > 0;
+}
+
+export function describeInvisibleTelegramText(text: string): string {
+  const count = Array.from(text).length;
+  const noun = count === 1 ? "character" : "characters";
+  return `Gemini generated ${count} invisible Unicode ${noun}. Telegram rejects that as an empty message, so the raw output is attached as a text file.`;
 }
 
 /** Max Telegram message length. */

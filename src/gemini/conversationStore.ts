@@ -45,6 +45,13 @@ export class ConversationStore {
     this.save();
   }
 
+  touch(sessionKey: string, updatedAt = new Date().toISOString()): void {
+    const session = this.data[sessionKey];
+    if (!session) return;
+    session.updatedAt = updatedAt;
+    this.save();
+  }
+
   delete(sessionKey: string): void {
     delete this.data[sessionKey];
     this.save();

@@ -10,6 +10,7 @@ async function main(): Promise<void> {
   const sessionManager = new GeminiSessionManager(
     config.gemini,
     config.sessionIdleTimeoutMs,
+    config.conversationTtlMs,
     config.maxSessionTabs,
   );
   const provider = new GeminiProvider(config.geminiProvider, config.gemini);

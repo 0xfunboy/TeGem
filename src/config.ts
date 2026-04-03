@@ -50,6 +50,8 @@ export interface AppConfig {
   rateLimitMs: number;
   /** Max idle time (ms) before a session tab is evicted. 0 = no eviction. */
   sessionIdleTimeoutMs: number;
+  /** Max inactivity window before a stored Gemini conversation is discarded. 0 = no expiry. */
+  conversationTtlMs: number;
   /** Max concurrent session tabs. 0 = unlimited. */
   maxSessionTabs: number;
 }
@@ -113,6 +115,7 @@ Rispondi sempre in modo naturale, utile e conciso. Se l'utente scrive in italian
     allowedGroups: readIdList("ALLOWED_GROUPS"),
     rateLimitMs: readNumber("RATE_LIMIT_MS", 3_000),
     sessionIdleTimeoutMs: readNumber("SESSION_IDLE_TIMEOUT_MS", 30 * 60_000), // 30 min default
+    conversationTtlMs: readNumber("SESSION_CONVERSATION_TTL_MS", 24 * 60 * 60_000), // 24h default
     maxSessionTabs: readNumber("MAX_SESSION_TABS", 20),
   };
 }

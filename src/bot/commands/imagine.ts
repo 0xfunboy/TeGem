@@ -6,7 +6,12 @@ import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
 import { getSessionKey, getSessionLabel } from "../sessionKey.js";
 import { startTyping } from "../middleware/typing.js";
-import { formatForTelegram } from "../format.js";
+import {
+  describeInvisibleTelegramText,
+  formatForTelegram,
+  hasVisibleTelegramText,
+  sanitizeTelegramDisplayText,
+} from "../format.js";
 
 export function makeImagineHandler(
   sessionManager: GeminiSessionManager,
@@ -57,15 +62,29 @@ export function makeImagineHandler(
 
       stopTyping();
 
+      const safeFinalText = sanitizeTelegramDisplayText(finalText);
       if (images.length > 0) {
-        const caption = finalText.trim() || undefined;
+        const caption = hasVisibleTelegramText(safeFinalText) ? safeFinalText : undefined;
         const src = images[0].src;
         const buf = Buffer.from(src.split(",")[1], "base64");
         await ctx.replyWithPhoto(new InputFile(buf, "image.png"), { caption });
-      } else if (finalText.trim()) {
+        if (finalText.length > 0 && !hasVisibleTelegramText(finalText)) {
+          await ctx.reply(describeInvisibleTelegramText(finalText)).catch(() => undefined);
+          await ctx.replyWithDocument(
+            new InputFile(Buffer.from(finalText, "utf8"), "gemini-response.txt"),
+            { caption: "Raw Gemini response" },
+          ).catch(() => undefined);
+        }
+      } else if (hasVisibleTelegramText(safeFinalText)) {
         await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML" }).catch(async () =>
-          ctx.reply(finalText),
+          ctx.reply(safeFinalText),
         );
+      } else if (finalText.length > 0) {
+        await ctx.reply(describeInvisibleTelegramText(finalText)).catch(() => undefined);
+        await ctx.replyWithDocument(
+          new InputFile(Buffer.from(finalText, "utf8"), "gemini-response.txt"),
+          { caption: "Raw Gemini response" },
+        ).catch(() => undefined);
       } else {
         await ctx.reply("Gemini non ha generato immagini. Prova con una descrizione diversa.");
       }

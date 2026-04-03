@@ -100,7 +100,7 @@ export class GeminiProvider {
     // Wait for Angular to finish replacing DOM elements after page load.
     // We verify the input is STABLE (same element) for two consecutive checks
     // before trusting it with click+type operations.
-    const input = await this.waitForStableInput(page, 15_000);
+    const input = await this.waitForStableInput(page, 6_000);
     if (!input) throw new Error("Input Gemini non trovato.");
 
     await input.click();
@@ -124,13 +124,13 @@ export class GeminiProvider {
       }
     }
 
-    // Re-focus in case the rich-textarea lost focus during typing
+    // Re-focus in case the rich-textarea lost focus during typing.
+    // No extra long wait here: once the cursor is live, we want to submit immediately.
     await input.click().catch(() => undefined);
-    await sleep(80);
 
+    const baselineAssistantCount = await this.countAssistantNodes(page).catch(() => 0);
     await this.submitPrompt(page);
-
-    await this.ensurePromptSubmitted(page, input, prompt);
+    await this.ensurePromptSubmitted(page, prompt, baselineAssistantCount);
   }
 
   /**
@@ -196,7 +196,10 @@ export class GeminiProvider {
         throw new GeminiTimeoutError("timeout massimo di risposta superato");
       }
 
-      const current = await this.readLastMessage(page, baseline);
+      const current = this.extractNewText(
+        baseline,
+        await this.readLastMessage(page, baseline),
+      );
       const hasImageSignal = await this.hasNewImages(page, baseline);
 
       if (current && current !== previous) {
@@ -508,17 +511,18 @@ export class GeminiProvider {
   private async waitForStableInput(page: Page, timeoutMs: number): Promise<import("playwright").Locator | null> {
     const selectors = [this.config.inputSelector, ...this.config.readySelectors];
     const deadline = Date.now() + timeoutMs;
+    const stabilityDelayMs = 120;
 
     let prevHandle: import("playwright").JSHandle | null = null;
 
     while (Date.now() < deadline) {
-      const selector = await this.findFirstVisible(page, selectors, 5_000);
-      if (!selector) { await sleep(300); continue; }
+      const selector = await this.findFirstVisible(page, selectors, 1_000);
+      if (!selector) { await sleep(stabilityDelayMs); continue; }
 
       const locator = page.locator(selector).first();
       // Get the underlying JS object handle to compare identity
       const handle = await locator.evaluateHandle((el) => el).catch(() => null);
-      if (!handle) { await sleep(300); continue; }
+      if (!handle) { await sleep(stabilityDelayMs); continue; }
 
       if (prevHandle !== null) {
         // Compare DOM node identity: same element = stable
@@ -534,12 +538,12 @@ export class GeminiProvider {
 
         if (isSame) return locator; // stable — same element twice in a row
         // element changed — reset and wait again
-        await sleep(400);
+        await sleep(stabilityDelayMs);
         continue;
       }
 
       prevHandle = handle;
-      await sleep(400);
+      await sleep(stabilityDelayMs);
     }
 
     // Dispose any remaining handle on timeout
@@ -555,7 +559,7 @@ export class GeminiProvider {
         const visible = await page.locator(selector).first().isVisible().catch(() => false);
         if (visible) return selector;
       }
-      await sleep(300);
+      await sleep(120);
     }
     return null;
   }
@@ -565,22 +569,25 @@ export class GeminiProvider {
     return selector ? page.locator(selector).first() : null;
   }
 
-  private async ensurePromptSubmitted(page: Page, _input: Locator, prompt: string): Promise<void> {
+  private async ensurePromptSubmitted(
+    page: Page,
+    prompt: string,
+    baselineAssistantCount: number,
+  ): Promise<void> {
     const normalizedPrompt = prompt.trim();
 
-    // Re-resolve the input locator each time to avoid stale element references.
-    // When the old element is detached, we must check the CURRENT input in the DOM.
-    const looksUnsent = async (): Promise<boolean> => {
-      // Try the configured input selector first, then fall back to contenteditable
+    const looksSubmitted = async (): Promise<boolean> => {
+      if (await this.isBusy(page)) return true;
+      const assistantCount = await this.countAssistantNodes(page).catch(() => baselineAssistantCount);
+      if (assistantCount > baselineAssistantCount) return true;
+
       const freshInput = await this.firstVisibleLocator(
         page,
         [this.config.inputSelector, "rich-textarea div[contenteditable='true']"],
-        1_500,
+        400,
       );
       if (!freshInput) {
-        // No visible input at all — could mean Gemini is processing (input hidden
-        // while generating). Check if Gemini is busy as a positive signal.
-        return false;
+        return true;
       }
       const current = await freshInput
         .evaluate((el) => {
@@ -588,33 +595,33 @@ export class GeminiProvider {
           return (f.value || f.innerText || f.textContent || "").trim();
         })
         .catch(() => "");
-      // If we got empty string, the input is empty — prompt was likely sent.
-      // If we got the prompt text back, it's still sitting there unsent.
-      return Boolean(current) && current.includes(normalizedPrompt);
+      return !current || !current.includes(normalizedPrompt);
     };
 
-    await sleep(250);
-    if (!(await looksUnsent())) return;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (await looksSubmitted()) return;
+      await sleep(90);
+      if (await looksSubmitted()) return;
 
-    // The prompt is still in the input — try harder to submit it.
-    // Use locator-scoped press instead of page.keyboard.press to avoid
-    // sending keystrokes to the wrong tab in parallel sessions.
-    const freshInput = await this.firstVisibleLocator(
-      page,
-      [this.config.inputSelector, "rich-textarea div[contenteditable='true']"],
-      2_000,
-    );
-    if (freshInput) {
-      for (const key of ["Control+Enter", "Meta+Enter", "Enter"]) {
+      const freshInput = await this.firstVisibleLocator(
+        page,
+        [this.config.inputSelector, "rich-textarea div[contenteditable='true']"],
+        500,
+      );
+      if (!freshInput) return;
+
+      const keys = attempt === 0
+        ? ["Enter"]
+        : ["Control+Enter", "Meta+Enter", "Enter"];
+
+      for (const key of keys) {
         await freshInput.press(key).catch(() => undefined);
-        await sleep(350);
-        if (!(await looksUnsent())) return;
+        await sleep(120);
+        if (await looksSubmitted()) return;
       }
-    }
 
-    // Last resort: try submitPrompt strategies again
-    await this.submitPrompt(page);
-    await sleep(500);
+      await this.submitPrompt(page);
+    }
   }
 
   private async readLastVisibleText(page: Page, selectors: string[]): Promise<string> {
@@ -1066,17 +1073,27 @@ export class GeminiProvider {
 
     while (Date.now() < deadline) {
       const video = await this.downloadLastResponseMenuMedia(page, {
-        icon: "movie",
-        label: "Video",
+        icons: ["movie", "videocam", "play_circle"],
+        labels: ["Video", "Download video"],
         filenameFallback: "generated_music_video.mp4",
       });
       const audio = await this.downloadLastResponseMenuMedia(page, {
-        icon: "music_note",
-        label: "Audio only",
+        icons: ["music_note", "audio_file", "graphic_eq"],
+        labels: ["Audio only", "Audio", "Download audio"],
         filenameFallback: "generated_music_audio.mp3",
       });
 
       if (video || audio) return { video, audio };
+
+      await this.activateLastResponsePlayButton(page);
+      const inlineMedia = await this.downloadGeneratedMedia(page, 4_000);
+      if (inlineMedia) {
+        return {
+          video: inlineMedia.mimeType.startsWith("video/") ? inlineMedia : null,
+          audio: inlineMedia.mimeType.startsWith("audio/") ? inlineMedia : null,
+        };
+      }
+
       await sleep(2_000);
     }
 
@@ -1090,9 +1107,17 @@ export class GeminiProvider {
    */
   async downloadGeneratedMedia(page: Page, timeoutMs = 120_000): Promise<GeneratedMedia | null> {
     const deadline = Date.now() + timeoutMs;
+    let playActivated = false;
 
     // Poll for audio/video elements in the last response
     while (Date.now() < deadline) {
+      const menuVideo = await this.downloadLastResponseMenuMedia(page, {
+        icons: ["movie", "videocam", "play_circle"],
+        labels: ["Video", "Download video"],
+        filenameFallback: "generated_video.mp4",
+      });
+      if (menuVideo) return menuVideo;
+
       // Check for <audio> or <video> elements with a src
       const media = await page.evaluate((): { src: string; type: string } | null => {
         const responses = document.querySelectorAll("response-container, message-content");
@@ -1140,6 +1165,14 @@ export class GeminiProvider {
         }
       }
 
+      if (!playActivated) {
+        playActivated = await this.activateLastResponsePlayButton(page);
+        if (playActivated) {
+          await sleep(1_000);
+          continue;
+        }
+      }
+
       // Also try download button approach — some media has a download action
       const dlBtn = page.locator("response-container").last()
         .locator('button:has(mat-icon[fonticon="download"])').first();
@@ -1159,30 +1192,59 @@ export class GeminiProvider {
 
   private async downloadLastResponseMenuMedia(
     page: Page,
-    option: { icon: string; label: string; filenameFallback: string },
+    option: { icons: string[]; labels: string[]; filenameFallback: string },
   ): Promise<GeneratedMedia | null> {
     const lastResponse = page.locator("response-container").last();
     if (!(await lastResponse.isVisible().catch(() => false))) return null;
 
     await lastResponse.scrollIntoViewIfNeeded().catch(() => undefined);
     await lastResponse.hover({ force: true }).catch(() => undefined);
-    await sleep(400);
+    await sleep(250);
 
     const downloadBtn = await this.findLastResponseDownloadButton(page, lastResponse);
-    if (!downloadBtn) return null;
-
-    await downloadBtn.click({ force: true }).catch(() => undefined);
-    await sleep(500);
-
-    const optionButton = this.findMenuOption(page, option.icon, option.label);
-    if (!(await optionButton.isVisible({ timeout: 3_000 }).catch(() => false))) {
-      await page.keyboard.press("Escape").catch(() => undefined);
-      return null;
+    if (downloadBtn) {
+      const directDownload = await this.triggerMenuDownloadFlow(page, downloadBtn, option);
+      if (directDownload) return directDownload;
     }
 
-    const download = await this.triggerDownloadWithMeta(page, optionButton, option.filenameFallback);
-    await page.keyboard.press("Escape").catch(() => undefined);
-    return download;
+    const moreBtn = await this.findLastResponseOverflowButton(page, lastResponse);
+    if (!moreBtn) return null;
+
+    return this.triggerMenuDownloadFlow(page, moreBtn, option, true);
+  }
+
+  private async triggerMenuDownloadFlow(
+    page: Page,
+    opener: Locator,
+    option: { icons: string[]; labels: string[]; filenameFallback: string },
+    viaOverflowMenu = false,
+  ): Promise<GeneratedMedia | null> {
+    await opener.click({ force: true }).catch(() => undefined);
+    await sleep(350);
+
+    let optionButton = this.findMenuOption(page, option.icons, option.labels);
+    if (await optionButton.isVisible({ timeout: 1_500 }).catch(() => false)) {
+      const direct = await this.triggerDownloadWithMeta(page, optionButton, option.filenameFallback);
+      await this.closeMenus(page);
+      return direct;
+    }
+
+    if (viaOverflowMenu) {
+      const downloadMenuEntry = this.findDownloadMenuOption(page);
+      if (await downloadMenuEntry.isVisible({ timeout: 1_500 }).catch(() => false)) {
+        await downloadMenuEntry.click({ force: true }).catch(() => undefined);
+        await sleep(350);
+        optionButton = this.findMenuOption(page, option.icons, option.labels);
+        if (await optionButton.isVisible({ timeout: 1_500 }).catch(() => false)) {
+          const nested = await this.triggerDownloadWithMeta(page, optionButton, option.filenameFallback);
+          await this.closeMenus(page);
+          return nested;
+        }
+      }
+    }
+
+    await this.closeMenus(page);
+    return null;
   }
 
   private async findLastResponseDownloadButton(page: Page, lastResponse: Locator): Promise<Locator | null> {
@@ -1200,13 +1262,89 @@ export class GeminiProvider {
     return null;
   }
 
-  private findMenuOption(page: Page, icon: string, label: string): Locator {
-    const labelPattern = new RegExp(this.escapeRegex(label), "i");
+  private async findLastResponseOverflowButton(page: Page, lastResponse: Locator): Promise<Locator | null> {
+    const candidates = [
+      lastResponse.locator('button:has(mat-icon[fonticon="more_vert"])').first(),
+      lastResponse.locator('button[aria-label*="More"]').first(),
+      lastResponse.locator('button[aria-label*="options"]').first(),
+      page.locator('button:has(mat-icon[fonticon="more_vert"])').last(),
+      page.locator('button[aria-label*="More"]').last(),
+    ];
 
-    return page.locator("button.mat-mdc-menu-item, button[mat-menu-item]").filter({
-      has: page.locator(`mat-icon[fonticon="${icon}"]`),
-      hasText: labelPattern,
+    for (const candidate of candidates) {
+      if (await candidate.isVisible().catch(() => false)) return candidate;
+    }
+
+    return null;
+  }
+
+  private findMenuOption(page: Page, icons: string[], labels: string[]): Locator {
+    const menuItems = page.locator("button.mat-mdc-menu-item, button[mat-menu-item], [role='menuitem']");
+    const labelPattern = new RegExp(labels.map((label) => this.escapeRegex(label)).join("|"), "i");
+
+    const textMatch = menuItems.filter({ hasText: labelPattern }).first();
+    const iconSelectors = icons.map((icon) => `mat-icon[fonticon="${icon}"]`).join(", ");
+    if (iconSelectors) {
+      const iconMatch = menuItems.filter({ has: page.locator(iconSelectors) }).filter({ hasText: labelPattern }).first();
+      return iconMatch.or(textMatch).first();
+    }
+
+    return textMatch;
+  }
+
+  private findDownloadMenuOption(page: Page): Locator {
+    const menuItems = page.locator("button.mat-mdc-menu-item, button[mat-menu-item], [role='menuitem']");
+    const textMatch = menuItems.filter({ hasText: /download/i }).first();
+    const iconMatch = menuItems.filter({
+      has: page.locator('mat-icon[fonticon="download"], mat-icon[fonticon="file_download"]'),
     }).first();
+    return iconMatch.or(textMatch).first();
+  }
+
+  private async closeMenus(page: Page): Promise<void> {
+    await page.keyboard.press("Escape").catch(() => undefined);
+    await sleep(80);
+    await page.keyboard.press("Escape").catch(() => undefined);
+  }
+
+  async hasGeneratedPlayableMedia(page: Page): Promise<boolean> {
+    return page.evaluate((): boolean => {
+      const responses = document.querySelectorAll("response-container, message-content");
+      if (responses.length === 0) return false;
+      const last = responses[responses.length - 1] as HTMLElement;
+      if (!last) return false;
+
+      if (last.querySelector("audio, video, audio source, video source")) return true;
+      if (last.querySelector('button[aria-label*="Play"], [role="button"][aria-label*="Play"]')) return true;
+      if (last.querySelector('mat-icon[fonticon="play_arrow"], mat-icon[fonticon="movie"], mat-icon[fonticon="music_note"]')) return true;
+
+      const text = (last.textContent ?? "").replace(/\s+/g, " ").trim();
+      return /\b\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}\b/.test(text);
+    }).catch(() => false);
+  }
+
+  private async activateLastResponsePlayButton(page: Page): Promise<boolean> {
+    const lastResponse = page.locator("response-container").last();
+    if (!(await lastResponse.isVisible().catch(() => false))) return false;
+
+    const candidates = [
+      lastResponse.locator('button[aria-label*="Play"]').first(),
+      lastResponse.locator('[role="button"][aria-label*="Play"]').first(),
+      lastResponse.locator('button:has(mat-icon[fonticon="play_arrow"])').first(),
+      lastResponse.locator('[role="button"]:has(mat-icon[fonticon="play_arrow"])').first(),
+    ];
+
+    for (const candidate of candidates) {
+      if (!(await candidate.isVisible({ timeout: 300 }).catch(() => false))) continue;
+      try {
+        await candidate.click({ force: true });
+        return true;
+      } catch {
+        continue;
+      }
+    }
+
+    return false;
   }
 
   private async triggerDownload(page: Page, locator: Locator): Promise<Buffer | null> {
@@ -1401,6 +1539,7 @@ export class GeminiProvider {
     cleaned = cleaned.replace(/^\s*Create image\s*$/gim, "");
     cleaned = cleaned.replace(/^\s*Help me learn\s*$/gim, "");
     cleaned = cleaned.replace(/^\s*Boost my day\s*$/gim, "");
+    cleaned = cleaned.replace(/^\s*\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}\s*$/gim, "");
 
     const noiseLines = new Set(["you said", "gemini said", "tools", "fast", "ask gemini 3"]);
 
