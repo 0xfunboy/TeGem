@@ -151,6 +151,40 @@ Cause:
 
 Mitigations:
 
-- restart the service periodically
-- clear unused sessions
-- add future tab eviction/LRU if the user base grows
+- idle tabs are now automatically evicted after `SESSION_IDLE_TIMEOUT_MS` (default 30 min)
+- a hard cap of `MAX_SESSION_TABS` (default 20) evicts LRU tabs when exceeded
+- conversation URLs are preserved in `sessions.json` — tabs restore seamlessly on next request
+- tune via `.env`:
+
+```env
+SESSION_IDLE_TIMEOUT_MS=1800000
+MAX_SESSION_TABS=20
+```
+
+## Rate limit triggered
+
+Symptom:
+
+- bot replies with "Too fast! Wait Xs before sending another request."
+
+This is expected behavior. The per-user cooldown (default 3s) prevents flooding.
+
+Fix:
+
+- wait the indicated time
+- adjust `RATE_LIMIT_MS` in `.env` if the default is too aggressive
+
+## Bot rejects all users after restart
+
+Symptom:
+
+- all users get "User or group not authorized" after restart
+
+Cause:
+
+- `ALLOWED_USERS` or `ALLOWED_GROUPS` is empty or unset in `.env`
+- auth is now deny-by-default: empty allowlists reject everyone
+
+Fix:
+
+- ensure `ALLOWED_USERS` and `ALLOWED_GROUPS` are set in `.env` with valid IDs

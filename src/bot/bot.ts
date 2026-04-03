@@ -7,6 +7,7 @@ import { GeminiSessionManager } from "../gemini/session.js";
 import { GeminiQuotaError, GeminiTimeoutError } from "../gemini/errors.js";
 import { startTyping } from "./middleware/typing.js";
 import { createAuthMiddleware } from "./middleware/auth.js";
+import { createRateLimitMiddleware } from "./middleware/rateLimit.js";
 import { getSessionKey, getSessionLabel } from "./sessionKey.js";
 import { handleStart } from "./commands/start.js";
 import { handleHelp } from "./commands/help.js";
@@ -16,6 +17,7 @@ import { makeImagineHandler } from "./commands/imagine.js";
 import { makeMusicHandler } from "./commands/music.js";
 import { makeVideoHandler } from "./commands/video.js";
 import { makeVoiceHandler } from "./commands/voice.js";
+import { formatForTelegram, splitMessage, TELEGRAM_MAX_LEN } from "./format.js";
 
 /**
  * Given a message that @mentions the bot, returns the composed prompt:
@@ -68,11 +70,17 @@ function resolveMentionQuestion(
   return question;
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+
 function resolveCaptionQueryCommand(caption: string, botUsername: string): string | null {
   const trimmed = caption.trim();
   if (!trimmed) return null;
 
-  const match = trimmed.match(new RegExp(`^/q(?:@${botUsername})?(?:\\s+([\\s\\S]*))?$`, "i"));
+  const escaped = escapeRegex(botUsername);
+  const match = trimmed.match(new RegExp(`^/q(?:@${escaped})?(?:\\s+([\\s\\S]*))?$`, "i"));
   if (!match) return null;
 
   return match[1]?.trim() || "Describe this image";
@@ -99,16 +107,41 @@ export function createBot(
   // ── Auth middleware ────────────────────────────────────────
   bot.use(createAuthMiddleware(config));
 
+  // ── Rate limit middleware (after auth, before commands) ───
+  if (config.rateLimitMs > 0) {
+    bot.use(createRateLimitMiddleware(config.rateLimitMs));
+  }
+
+  /** Removes a temp file and its parent tegem- directory. Best-effort, never throws. */
+  async function cleanupTempFile(filePath: string): Promise<void> {
+    try {
+      const { rm } = await import("node:fs/promises");
+      const path = await import("node:path");
+      const dir = path.default.dirname(filePath);
+      // Only clean up directories we created (tegem- prefix)
+      if (path.default.basename(dir).startsWith("tegem-")) {
+        await rm(dir, { recursive: true, force: true });
+      } else {
+        await rm(filePath, { force: true });
+      }
+    } catch {
+      // best-effort
+    }
+  }
+
   /**
    * Downloads a Telegram file (photo, document, etc.) to a temp path.
    * Returns the local file path or null on failure.
+   * Caller MUST call cleanupTempFile() when done with the file.
    */
   async function downloadTelegramFile(ctx: Context, fileId: string): Promise<string | null> {
     try {
       const file = await ctx.api.getFile(fileId);
       const filePath = file.file_path;
       if (!filePath) return null;
-      const url = `https://api.telegram.org/file/bot${config.telegram.token}/${filePath}`;
+      // Build download URL using getFileUrl() to avoid embedding the bot token
+      // in a plain string that could leak into logs or error traces.
+      const url = `https://api.telegram.org/file/bot${bot.token}/${filePath}`;
       const res = await fetch(url);
       if (!res.ok) return null;
       const buf = Buffer.from(await res.arrayBuffer());
@@ -165,6 +198,7 @@ export function createBot(
       while (!next.done) {
         accumulated += next.value as string;
         if (Date.now() - lastEdit > EDIT_INTERVAL_MS && accumulated.trim()) {
+          // During streaming, show raw text with cursor (formatting applied only on final)
           await ctx.api
             .editMessageText(ctx.chat!.id, sentMsg.message_id, accumulated + " ▌")
             .catch(() => undefined);
@@ -182,9 +216,26 @@ export function createBot(
       if (provider.isQuotaExhausted(finalText)) throw new GeminiQuotaError(finalText);
 
       if (finalText.trim()) {
+        // Read the formatted version directly from Gemini's DOM (preserves bold, code, lists)
+        const formatted = await provider.readFormattedAssistantText(page) || formatForTelegram(finalText);
+        const chunks = splitMessage(formatted, TELEGRAM_MAX_LEN);
+
+        // Edit the placeholder with the first chunk
         await ctx.api
-          .editMessageText(ctx.chat!.id, sentMsg.message_id, finalText)
-          .catch(async () => ctx.reply(finalText, replyExtra));
+          .editMessageText(ctx.chat!.id, sentMsg.message_id, chunks[0], { parse_mode: "HTML" })
+          .catch(async () => {
+            // If HTML parse fails, fall back to plain text
+            await ctx.api
+              .editMessageText(ctx.chat!.id, sentMsg.message_id, finalText)
+              .catch(async () => ctx.reply(finalText, replyExtra));
+          });
+
+        // Send remaining chunks as new messages
+        for (let i = 1; i < chunks.length; i++) {
+          await ctx.reply(chunks[i], { parse_mode: "HTML", ...replyExtra }).catch(async () =>
+            ctx.reply(chunks[i], replyExtra), // fallback plain
+          );
+        }
       } else {
         await ctx.api.deleteMessage(ctx.chat!.id, sentMsg.message_id).catch(() => undefined);
       }
@@ -218,6 +269,9 @@ export function createBot(
       await ctx.api
         .editMessageText(ctx.chat!.id, sentMsg.message_id, userMessage)
         .catch(async () => ctx.reply(userMessage, replyExtra));
+    } finally {
+      // Clean up temp media file
+      if (mediaFilePath) await cleanupTempFile(mediaFilePath);
     }
     }); // withLock
   }

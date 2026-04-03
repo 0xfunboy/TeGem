@@ -164,9 +164,11 @@ export class GeminiProvider {
       }
     }
 
-    // Strategy 3: dispatch Enter via JS on whatever element currently has focus
+    // Strategy 3: dispatch Enter via JS on the contenteditable element (scoped, not relying on focus)
     await page.evaluate(() => {
-      const el = document.activeElement ?? document.querySelector("[contenteditable='true']");
+      // Target the specific input element, not document.activeElement which could be wrong
+      const el = document.querySelector("rich-textarea div[contenteditable='true']")
+        ?? document.querySelector("[contenteditable='true']");
       if (!el) return;
       for (const type of ["keydown", "keypress", "keyup"] as const) {
         el.dispatchEvent(new KeyboardEvent(type, {
@@ -301,6 +303,156 @@ export class GeminiProvider {
     ]);
   }
 
+  /**
+   * Reads the last assistant response and converts its DOM structure to
+   * Telegram HTML, preserving bold, italic, code, code blocks, and lists.
+   * Falls back to plain innerText if DOM walk fails.
+   */
+  async readFormattedAssistantText(page: Page): Promise<string> {
+    const html = await page.evaluate((): string => {
+      type DomLike = { querySelectorAll: (s: string) => unknown[] };
+
+      const doc = (globalThis as unknown as { document?: DomLike }).document;
+      if (!doc) return "";
+
+      const all = doc.querySelectorAll("message-content") as HTMLElement[];
+      const topLevel = Array.from(all).filter(
+        (el) => el.parentElement?.closest?.("message-content") === null,
+      );
+      if (topLevel.length === 0) return "";
+      const root = topLevel[topLevel.length - 1];
+
+      // ── DOM walker: converts Gemini's rendered HTML to Telegram HTML ──
+      function walk(node: Node): string {
+        if (node.nodeType === Node.TEXT_NODE) {
+          return escapeH(node.textContent ?? "");
+        }
+
+        if (node.nodeType !== Node.ELEMENT_NODE) return "";
+        const el = node as HTMLElement;
+        const tag = el.tagName.toLowerCase();
+
+        // Skip hidden elements
+        if (el.offsetParent === null && tag !== "body" && tag !== "html" && !["code", "span"].includes(tag)) {
+          // Exception: code inside pre is technically hidden but we want it
+          if (!(tag === "code" && el.parentElement?.tagName.toLowerCase() === "pre")) {
+            return "";
+          }
+        }
+
+        const children = () => Array.from(el.childNodes).map(walk).join("");
+
+        switch (tag) {
+          case "b":
+          case "strong":
+            return `<b>${children()}</b>`;
+          case "i":
+          case "em":
+            return `<i>${children()}</i>`;
+          case "u":
+            return `<u>${children()}</u>`;
+          case "s":
+          case "del":
+          case "strike":
+            return `<s>${children()}</s>`;
+          case "code": {
+            // If inside <pre>, preserve as code block
+            const parent = el.parentElement;
+            if (parent && parent.tagName.toLowerCase() === "pre") {
+              // Get language from class if available
+              const langClass = el.className.match(/language-(\w+)/);
+              const langAttr = langClass ? ` class="language-${escapeH(langClass[1])}"` : "";
+              return `<code${langAttr}>${escapeH(el.textContent ?? "")}</code>`;
+            }
+            return `<code>${escapeH(el.textContent ?? "")}</code>`;
+          }
+          case "pre":
+            return `<pre>${children()}</pre>\n`;
+          case "a": {
+            const href = el.getAttribute("href");
+            if (href) return `<a href="${escapeH(href)}">${children()}</a>`;
+            return children();
+          }
+          case "br":
+            return "\n";
+          case "p":
+            return children() + "\n\n";
+          case "div":
+            return children() + "\n";
+          case "h1":
+          case "h2":
+          case "h3":
+          case "h4":
+          case "h5":
+          case "h6":
+            return `<b>${children()}</b>\n\n`;
+          case "li": {
+            const parentTag = el.parentElement?.tagName.toLowerCase();
+            if (parentTag === "ol") {
+              // Numbered list — find index
+              const siblings = Array.from(el.parentElement!.children);
+              const idx = siblings.indexOf(el) + 1;
+              return `${idx}. ${children().trim()}\n`;
+            }
+            return `▸ ${children().trim()}\n`;
+          }
+          case "ul":
+          case "ol":
+            return "\n" + children() + "\n";
+          case "blockquote":
+            return children().trim().split("\n").map((l: string) => `» ${l}`).join("\n") + "\n\n";
+          case "table":
+            return formatTable(el) + "\n\n";
+          case "img":
+            return ""; // skip images (handled separately)
+          case "hr":
+            return "───────────────\n";
+          default:
+            return children();
+        }
+      }
+
+      function escapeH(text: string): string {
+        return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function formatTable(table: HTMLElement): string {
+        const rows: string[][] = [];
+        table.querySelectorAll("tr").forEach((tr) => {
+          const cells: string[] = [];
+          tr.querySelectorAll("th, td").forEach((cell) => {
+            cells.push((cell.textContent ?? "").trim());
+          });
+          rows.push(cells);
+        });
+        if (rows.length === 0) return "";
+
+        // Calculate column widths
+        const colWidths = rows[0].map((_, ci) =>
+          Math.max(...rows.map((r) => (r[ci] ?? "").length)),
+        );
+
+        return `<pre>${rows
+          .map((row) =>
+            row.map((cell, ci) => cell.padEnd(colWidths[ci] ?? 0)).join(" │ "),
+          )
+          .join("\n")}</pre>`;
+      }
+
+      const result = walk(root);
+
+      // Clean up excessive whitespace
+      return result
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }).catch(() => "");
+
+    if (html) return html;
+
+    // Fallback to plain innerText
+    return this.readAssistantText(page);
+  }
+
   private async countMessages(page: Page): Promise<number> {
     for (const selector of this.config.messageSelectors) {
       const count = await page.locator(selector).count();
@@ -357,7 +509,7 @@ export class GeminiProvider {
     const selectors = [this.config.inputSelector, ...this.config.readySelectors];
     const deadline = Date.now() + timeoutMs;
 
-    let prevHandle: unknown = null;
+    let prevHandle: import("playwright").JSHandle | null = null;
 
     while (Date.now() < deadline) {
       const selector = await this.findFirstVisible(page, selectors, 5_000);
@@ -375,10 +527,13 @@ export class GeminiProvider {
           [prevHandle, handle] as [unknown, unknown],
         ).catch(() => false);
 
-        await handle.dispose?.().catch(() => undefined);
+        // Dispose BOTH handles to prevent leaks
+        await handle.dispose().catch(() => undefined);
+        await prevHandle.dispose().catch(() => undefined);
+        prevHandle = null;
 
         if (isSame) return locator; // stable — same element twice in a row
-        prevHandle = null; // element changed — reset and wait again
+        // element changed — reset and wait again
         await sleep(400);
         continue;
       }
@@ -386,6 +541,9 @@ export class GeminiProvider {
       prevHandle = handle;
       await sleep(400);
     }
+
+    // Dispose any remaining handle on timeout
+    if (prevHandle) await prevHandle.dispose().catch(() => undefined);
 
     return null;
   }
@@ -439,10 +597,19 @@ export class GeminiProvider {
     if (!(await looksUnsent())) return;
 
     // The prompt is still in the input — try harder to submit it.
-    for (const key of ["Control+Enter", "Meta+Enter", "Enter"]) {
-      await page.keyboard.press(key).catch(() => undefined);
-      await sleep(350);
-      if (!(await looksUnsent())) return;
+    // Use locator-scoped press instead of page.keyboard.press to avoid
+    // sending keystrokes to the wrong tab in parallel sessions.
+    const freshInput = await this.firstVisibleLocator(
+      page,
+      [this.config.inputSelector, "rich-textarea div[contenteditable='true']"],
+      2_000,
+    );
+    if (freshInput) {
+      for (const key of ["Control+Enter", "Meta+Enter", "Enter"]) {
+        await freshInput.press(key).catch(() => undefined);
+        await sleep(350);
+        if (!(await looksUnsent())) return;
+      }
     }
 
     // Last resort: try submitPrompt strategies again
@@ -664,85 +831,167 @@ export class GeminiProvider {
   }
 
   /**
-   * Clicks the "⋮" menu on the last response container, then "Listen", and
-   * intercepts the audio network response to obtain the raw audio bytes.
-   * Returns null if no audio can be captured.
-   */
-  /**
    * Clicks the "⋮" menu on the last response, selects "Listen", and
-   * intercepts the TTS audio network response.
+   * captures the TTS audio using multiple strategies:
+   *
+   * 1. AudioContext.decodeAudioData hook — Gemini feeds TTS data through
+   *    Web Audio API; we intercept the raw ArrayBuffer before decoding.
+   * 2. page.on("response") — catches direct audio HTTP responses.
+   * 3. DOM <audio> element polling — catches blob: or src-based players.
    */
   async downloadLastResponseAudio(page: Page): Promise<Buffer | null> {
-    // Register a route interceptor to capture audio responses BEFORE triggering them.
-    // This is more reliable than page.on("response") because routes fire synchronously.
     let audioBuffer: Buffer | null = null;
     let gotAudio = false;
 
-    await page.route("**/*", async (route) => {
-      const request = route.request();
-      // Let the request through, then inspect the response
-      const response = await route.fetch().catch(() => null);
-      if (!response) { await route.abort().catch(() => undefined); return; }
+    // ── Strategy 1: Hook AudioContext.decodeAudioData ──
+    // Gemini's TTS likely fetches audio bytes via batchexecute RPC, then feeds
+    // the ArrayBuffer to AudioContext.decodeAudioData. We monkey-patch it to
+    // stash the raw bytes in window.__tegemCapturedAudio.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __tegemCapturedAudio?: string;
+        AudioContext: typeof AudioContext;
+        webkitAudioContext?: typeof AudioContext;
+      };
+      const AC = w.AudioContext || w.webkitAudioContext;
+      if (!AC) return;
 
-      const ct = response.headers()["content-type"] ?? "";
-      if (!gotAudio && (ct.startsWith("audio/") || ct.includes("mpeg") || ct.includes("ogg"))) {
-        gotAudio = true;
-        audioBuffer = Buffer.from(await response.body());
+      const origDecode = AC.prototype.decodeAudioData;
+      AC.prototype.decodeAudioData = function (
+        this: AudioContext,
+        buf: ArrayBuffer,
+        ...rest: unknown[]
+      ): Promise<AudioBuffer> {
+        // Only capture the first call (the TTS audio)
+        if (!w.__tegemCapturedAudio && buf.byteLength > 1000) {
+          const bytes = new Uint8Array(buf.slice(0)); // clone before decode consumes it
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          w.__tegemCapturedAudio = btoa(binary);
+        }
+        return origDecode.apply(this, [buf, ...rest] as unknown as [ArrayBuffer, DecodeSuccessCallback?, DecodeErrorCallback?]);
+      };
+    }).catch(() => undefined);
+
+    // ── Strategy 2: Network response listener ──
+    const responseHandler = async (response: import("playwright").Response): Promise<void> => {
+      if (gotAudio) return;
+      try {
+        const ct = response.headers()["content-type"] ?? "";
+        if (ct.startsWith("audio/") || ct.includes("mpeg") || ct.includes("ogg") || ct.includes("wav")) {
+          const body = await response.body();
+          if (body.length > 1000) {
+            gotAudio = true;
+            audioBuffer = Buffer.from(body);
+          }
+        }
+      } catch {
+        // Response body may not be available
       }
+    };
 
-      await route.fulfill({ response }).catch(() => undefined);
-    });
+    page.on("response", responseHandler);
 
     try {
-      // Find and click the ⋮ button on the last response-container
+      // ── Open menu and click Listen ──
       const lastResponse = page.locator("response-container").last();
-
-      // Hover over the response first — the ⋮ button may only appear on hover
       await lastResponse.hover({ force: true }).catch(() => undefined);
       await sleep(400);
 
-      // Look for the ⋮ button both inside the response and in the action bar
-      const moreBtn = lastResponse
+      // Find ⋮ button: try scoped to response, then page-wide
+      let moreBtn = lastResponse
         .locator('button:has(mat-icon[fonticon="more_vert"])')
         .first();
-
-      if (!(await moreBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
+      if (!(await moreBtn.isVisible({ timeout: 2_000 }).catch(() => false))) {
+        moreBtn = page.locator('button:has(mat-icon[fonticon="more_vert"])').last();
+      }
+      if (!(await moreBtn.isVisible({ timeout: 2_000 }).catch(() => false))) {
         return null;
       }
 
       await moreBtn.click({ force: true });
       await sleep(600);
 
-      // Click "Listen" — it should be in a mat-menu overlay
-      const listenBtn = page
-        .locator('button:has(mat-icon[fonticon="volume_up"])')
-        .first();
+      // Find Listen button
+      const listenBtn =
+        (await page.locator('button[aria-labelledby="tts-label"]').first().isVisible({ timeout: 2_000 }).catch(() => false))
+          ? page.locator('button[aria-labelledby="tts-label"]').first()
+          : (await page.locator('button:has(mat-icon[fonticon="volume_up"])').first().isVisible({ timeout: 2_000 }).catch(() => false))
+            ? page.locator('button:has(mat-icon[fonticon="volume_up"])').first()
+            : (await page.locator('button.mat-mdc-menu-item').filter({ hasText: /listen/i }).first().isVisible({ timeout: 1_000 }).catch(() => false))
+              ? page.locator('button.mat-mdc-menu-item').filter({ hasText: /listen/i }).first()
+              : null;
 
-      if (!(await listenBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
-        // Try the tts-label selector as fallback
-        const fallback = page.locator('button[aria-labelledby="tts-label"]').first();
-        if (await fallback.isVisible({ timeout: 2_000 }).catch(() => false)) {
-          await fallback.click({ force: true });
-        } else {
-          // Dismiss menu
-          const contentEditable = page.locator("rich-textarea div[contenteditable='true']").first();
-          await contentEditable.press("Escape").catch(() => undefined);
-          return null;
-        }
-      } else {
-        await listenBtn.click({ force: true });
+      if (!listenBtn) {
+        await page.keyboard.press("Escape").catch(() => undefined);
+        return null;
       }
 
-      // Wait for the audio to arrive via the route interceptor
+      await listenBtn.click({ force: true });
+
+      // ── Wait for audio from any strategy ──
       const deadline = Date.now() + 30_000;
       while (Date.now() < deadline && !gotAudio) {
-        await sleep(500);
+        // Check Strategy 1: AudioContext hook
+        const captured = await page.evaluate(() => {
+          const w = window as unknown as { __tegemCapturedAudio?: string };
+          const data = w.__tegemCapturedAudio;
+          if (data) {
+            delete w.__tegemCapturedAudio; // consume it
+            return data;
+          }
+          return null;
+        }).catch(() => null);
+
+        if (captured) {
+          gotAudio = true;
+          audioBuffer = Buffer.from(captured, "base64");
+          break;
+        }
+
+        // Check Strategy 3: DOM <audio> elements
+        const audioSrc = await page.evaluate(() => {
+          const audios = document.querySelectorAll("audio");
+          for (const a of audios) {
+            if (a.src && !a.paused && a.readyState >= 2) return a.src;
+            if (a.currentSrc && !a.paused && a.readyState >= 2) return a.currentSrc;
+          }
+          return null;
+        }).catch(() => null);
+
+        if (audioSrc && !gotAudio) {
+          // Try to fetch the audio data from the page context
+          const fetched = await page.evaluate(async (src: string) => {
+            try {
+              const res = await fetch(src);
+              const blob = await res.blob();
+              const buf = await blob.arrayBuffer();
+              const bytes = new Uint8Array(buf);
+              let binary = "";
+              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+              return btoa(binary);
+            } catch { return null; }
+          }, audioSrc).catch(() => null);
+
+          if (fetched) {
+            gotAudio = true;
+            audioBuffer = Buffer.from(fetched, "base64");
+            break;
+          }
+        }
+
+        await sleep(800);
       }
+
+      // Cleanup: restore original decodeAudioData
+      await page.evaluate(() => {
+        const w = window as unknown as { __tegemCapturedAudio?: string };
+        delete w.__tegemCapturedAudio;
+      }).catch(() => undefined);
 
       return audioBuffer;
     } finally {
-      // Remove the route interceptor
-      await page.unroute("**/*").catch(() => undefined);
+      page.off("response", responseHandler);
     }
   }
 
@@ -1130,7 +1379,7 @@ export class GeminiProvider {
     let cleaned = text.trim();
     if (!cleaned) return "";
 
-    if (prompt) cleaned = cleaned.split(prompt).join(" ").trim();
+    if (prompt) cleaned = cleaned.replaceAll(prompt, " ").trim();
 
     const noise = [
       "Gemini isn't human. It can make mistakes, including about people, so double-check it.",

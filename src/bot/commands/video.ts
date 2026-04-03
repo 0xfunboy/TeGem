@@ -6,6 +6,7 @@ import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
 import { getSessionKey, getSessionLabel } from "../sessionKey.js";
 import { startTyping } from "../middleware/typing.js";
+import { formatForTelegram } from "../format.js";
 
 export function makeVideoHandler(
   sessionManager: GeminiSessionManager,
@@ -59,7 +60,9 @@ export function makeVideoHandler(
       }
 
       if (finalText.trim()) {
-        await ctx.reply(finalText, replyExtra);
+        await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML", ...replyExtra }).catch(async () =>
+          ctx.reply(finalText, replyExtra),
+        );
       } else if (!media) {
         await ctx.reply("Gemini did not generate a video. Try a different description.", replyExtra);
       }
