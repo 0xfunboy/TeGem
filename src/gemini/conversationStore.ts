@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface StoredSession {
@@ -13,10 +14,13 @@ export interface StoredSession {
  * to their Gemini conversation IDs, so conversations survive bot restarts.
  *
  * Stored as a JSON file on disk next to the browser profile.
+ * Load is sync (only at startup), save is async (non-blocking).
  */
 export class ConversationStore {
   private data: Record<string, StoredSession> = {};
   private filePath: string;
+  /** Serializes save operations so writes don't interleave. */
+  private saveQueue: Promise<void> = Promise.resolve();
 
   constructor(baseDir: string) {
     this.filePath = path.join(baseDir, "sessions.json");
@@ -50,6 +54,7 @@ export class ConversationStore {
     return { ...this.data };
   }
 
+  /** Sync load — only called once at startup. */
   private load(): void {
     try {
       const raw = readFileSync(this.filePath, "utf8");
@@ -59,11 +64,11 @@ export class ConversationStore {
     }
   }
 
+  /** Async save — queued to prevent interleaved writes. */
   private save(): void {
-    try {
-      writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf8");
-    } catch (err) {
-      console.error("[ConversationStore] Failed to save sessions:", err);
-    }
+    const json = JSON.stringify(this.data, null, 2);
+    this.saveQueue = this.saveQueue
+      .then(() => writeFile(this.filePath, json, "utf8"))
+      .catch((err) => console.error("[ConversationStore] Failed to save sessions:", err));
   }
 }

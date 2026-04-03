@@ -29,15 +29,10 @@ npm run playwright:install
 cp .env.example .env
 ```
 
-Minimum:
+Minimum (auth is deny-by-default — allowlists are required):
 
 ```env
 TELEGRAM_BOT_TOKEN=123456789:AAF...
-```
-
-Optional allowlist:
-
-```env
 ALLOWED_USERS=123456789
 ALLOWED_GROUPS=-1001234567890
 ```
@@ -159,3 +154,6 @@ pm2 startup
 - the Chrome profile is shared, but Gemini pages are separated per session key
 - `sessions.json` stores sessionKey → conversationUrl mappings
 - if you change bot behavior around session identity, old mappings in `sessions.json` may need manual cleanup
+- idle tabs are evicted after `SESSION_IDLE_TIMEOUT_MS` (default 30 min) — conversations are preserved and restored on demand
+- per-user rate limiting (default 3s) is active; adjust `RATE_LIMIT_MS` if needed
+- auth is deny-by-default: if allowlists are empty, no one can use the bot

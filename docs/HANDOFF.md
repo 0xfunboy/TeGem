@@ -52,7 +52,8 @@ Each session key maps to its own Gemini conversation URL in:
 |---|---|
 | `src/bot/bot.ts` | main Telegram routing, `/q`, `/vision`, media reply logic |
 | `src/bot/sessionKey.ts` | session key strategy |
-| `src/bot/middleware/auth.ts` | optional allowlist |
+| `src/bot/middleware/auth.ts` | deny-by-default allowlist |
+| `src/bot/middleware/rateLimit.ts` | per-user request cooldown |
 | `src/gemini/session.ts` | tab-per-session management, restore, duplicate conversation guards |
 | `src/gemini/provider.ts` | Gemini DOM automation, upload/download logic |
 | `src/gemini/conversationStore.ts` | persistent session mapping store |
@@ -92,9 +93,41 @@ Still best-effort. It depends on:
 - the TTS button selector staying stable
 - the audio network response being capturable
 
-### 3. Long-lived resource usage
+## Security hardening (applied)
 
-Every active session keeps a tab open. There is still no eviction policy.
+The following security measures are now in place:
+
+### Auth: deny-by-default
+
+If `ALLOWED_USERS` or `ALLOWED_GROUPS` are empty or unset, the bot denies all access. This prevents accidental open access if `.env` is corrupted or reset.
+
+### Rate limiting
+
+Per-user cooldown (default 3s) between requests. Configurable via `RATE_LIMIT_MS`. Commands `/start`, `/help`, `/status` are exempt.
+
+### Idle tab eviction
+
+Session tabs are automatically closed after `SESSION_IDLE_TIMEOUT_MS` (default 30 min). The conversation mapping in `sessions.json` is preserved — the tab is seamlessly restored on the next request. A hard cap of `MAX_SESSION_TABS` (default 20) evicts LRU tabs when exceeded.
+
+### Temp file cleanup
+
+Downloaded Telegram media files are cleaned up immediately after use. No more disk accumulation from `tegem-*` temp directories.
+
+### Safe audio capture
+
+`downloadLastResponseAudio()` uses `page.on("response")` listener instead of `page.route("**/*")`. No more proxying all network traffic through a handler that could break the page.
+
+### Parallel-safe keyboard input
+
+`ensurePromptSubmitted()` and `submitPrompt()` use locator-scoped press and explicit element targeting, not `page.keyboard.press()` or `document.activeElement`, which could interfere across parallel tabs.
+
+### Async ConversationStore I/O
+
+`sessions.json` saves are now async and queued. No more blocking the event loop under load.
+
+### Message length splitting
+
+Responses longer than 4096 characters are automatically split across multiple Telegram messages.
 
 ## Known operational pitfalls
 
@@ -115,6 +148,5 @@ Remove the bad entry and restart the bot. The runtime now tries to reject duplic
 ## Recommended next areas
 
 1. make `/voice` reliable
-2. add tab eviction / idle page cleanup
-3. improve structured visual prompts for OCR/document workflows
-4. add stronger logging around upload target selection and media attach success
+2. improve structured visual prompts for OCR/document workflows
+3. add stronger logging around upload target selection and media attach success

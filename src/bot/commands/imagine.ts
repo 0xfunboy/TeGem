@@ -6,6 +6,7 @@ import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
 import { getSessionKey, getSessionLabel } from "../sessionKey.js";
 import { startTyping } from "../middleware/typing.js";
+import { formatForTelegram } from "../format.js";
 
 export function makeImagineHandler(
   sessionManager: GeminiSessionManager,
@@ -62,8 +63,9 @@ export function makeImagineHandler(
         const buf = Buffer.from(src.split(",")[1], "base64");
         await ctx.replyWithPhoto(new InputFile(buf, "image.png"), { caption });
       } else if (finalText.trim()) {
-        // Gemini replied with text only (e.g. declined image generation)
-        await ctx.reply(finalText);
+        await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML" }).catch(async () =>
+          ctx.reply(finalText),
+        );
       } else {
         await ctx.reply("Gemini non ha generato immagini. Prova con una descrizione diversa.");
       }
