@@ -6,7 +6,12 @@ import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
 import { getSessionKey, getSessionLabel } from "../sessionKey.js";
 import { startTyping } from "../middleware/typing.js";
-import { formatForTelegram } from "../format.js";
+import {
+  describeInvisibleTelegramText,
+  formatForTelegram,
+  hasVisibleTelegramText,
+  sanitizeTelegramDisplayText,
+} from "../format.js";
 
 export function makeMusicHandler(
   sessionManager: GeminiSessionManager,
@@ -69,10 +74,20 @@ export function makeMusicHandler(
         );
       }
 
-      if (finalText.trim()) {
+      const safeFinalText = sanitizeTelegramDisplayText(finalText);
+      if (hasVisibleTelegramText(safeFinalText)) {
         await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML", ...replyExtra }).catch(async () =>
-          ctx.reply(finalText, replyExtra),
+          ctx.reply(safeFinalText, replyExtra),
         );
+      } else if (finalText.length > 0) {
+        await ctx.reply(describeInvisibleTelegramText(finalText), replyExtra).catch(() => undefined);
+        await ctx.replyWithDocument(
+          new InputFile(Buffer.from(finalText, "utf8"), "gemini-response.txt"),
+          {
+            caption: "Raw Gemini response",
+            ...replyExtra,
+          },
+        ).catch(() => undefined);
       } else if (!sentMedia) {
         await ctx.reply("Gemini did not generate music. Try a different description.", replyExtra);
       }

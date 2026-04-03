@@ -31,20 +31,29 @@ export class GeminiSessionManager {
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
   /** Idle timeout in ms. 0 = no eviction. */
   private readonly idleTimeoutMs: number;
+  /** Max inactivity before a stored conversation mapping is discarded. 0 = no expiry. */
+  private readonly conversationTtlMs: number;
   /** Max concurrent tabs. 0 = unlimited. */
   private readonly maxTabs: number;
 
-  constructor(private readonly config: GeminiConfig, idleTimeoutMs = 0, maxTabs = 0) {
+  constructor(
+    private readonly config: GeminiConfig,
+    idleTimeoutMs = 0,
+    conversationTtlMs = 0,
+    maxTabs = 0,
+  ) {
     const storeDir = path.join(
       config.baseProfileDir,
       config.profileNamespace,
     );
     this.store = new ConversationStore(storeDir);
     this.idleTimeoutMs = idleTimeoutMs;
+    this.conversationTtlMs = conversationTtlMs;
     this.maxTabs = maxTabs;
+    this.pruneExpiredStoredSessions();
 
     // Start eviction sweep every 60s if idle timeout is configured
-    if (this.idleTimeoutMs > 0) {
+    if (this.idleTimeoutMs > 0 || this.conversationTtlMs > 0) {
       this.evictionTimer = setInterval(() => this.evictIdleSessions(), 60_000);
       this.evictionTimer.unref();
     }
@@ -102,6 +111,7 @@ export class GeminiSessionManager {
       return await fn();
     } finally {
       this.lastActivity.set(sessionKey, Date.now());
+      this.store.touch(sessionKey);
       releaseLock();
       // Clean up if no more waiters
       if (this.locks.get(sessionKey) === next) this.locks.delete(sessionKey);
@@ -135,7 +145,12 @@ export class GeminiSessionManager {
     // Start URL tracking so we capture the conversation ID after first message
     this.trackConversationUrl(page, sessionKey, label ?? sessionKey, provider.baseUrl);
 
-    const stored = this.store.get(sessionKey);
+    let stored = this.store.get(sessionKey);
+    if (stored && this.isStoredSessionExpired(stored)) {
+      console.log(`[Session] Expiring stale conversation for ${sessionKey} (TTL reached).`);
+      this.store.delete(sessionKey);
+      stored = undefined;
+    }
     const duplicateOwner = stored
       ? this.store.findSessionKeyByConversationId(stored.conversationId, sessionKey)
       : undefined;
@@ -224,6 +239,8 @@ export class GeminiSessionManager {
         this.lastActivity.delete(sessionKey);
       }
     }
+
+    this.pruneExpiredStoredSessions(now);
   }
 
   async close(): Promise<void> {
@@ -389,5 +406,21 @@ export class GeminiSessionManager {
   private extractConversationId(url: string): string | null {
     const match = url.match(/\/app\/([a-f0-9]{8,})/i);
     return match?.[1] ?? null;
+  }
+
+  private isStoredSessionExpired(session: StoredSession, now = Date.now()): boolean {
+    if (this.conversationTtlMs <= 0) return false;
+    const updatedAtMs = Date.parse(session.updatedAt);
+    if (!Number.isFinite(updatedAtMs)) return false;
+    return now - updatedAtMs > this.conversationTtlMs;
+  }
+
+  private pruneExpiredStoredSessions(now = Date.now()): void {
+    if (this.conversationTtlMs <= 0) return;
+    for (const [sessionKey, session] of Object.entries(this.store.all())) {
+      if (!this.isStoredSessionExpired(session, now)) continue;
+      console.log(`[Session] Removing expired stored conversation for ${sessionKey}.`);
+      this.store.delete(sessionKey);
+    }
   }
 }

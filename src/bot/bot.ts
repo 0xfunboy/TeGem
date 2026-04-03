@@ -17,7 +17,20 @@ import { makeImagineHandler } from "./commands/imagine.js";
 import { makeMusicHandler } from "./commands/music.js";
 import { makeVideoHandler } from "./commands/video.js";
 import { makeVoiceHandler } from "./commands/voice.js";
-import { formatForTelegram, splitMessage, TELEGRAM_MAX_LEN } from "./format.js";
+import {
+  describeInvisibleTelegramText,
+  formatForTelegram,
+  hasVisibleTelegramText,
+  sanitizeTelegramDisplayText,
+  splitMessage,
+  TELEGRAM_MAX_LEN,
+} from "./format.js";
+
+type ReplyExtra = {
+  reply_parameters?: {
+    message_id: number;
+  };
+};
 
 /**
  * Given a message that @mentions the bot, returns the composed prompt:
@@ -103,13 +116,14 @@ export function createBot(
   provider: GeminiProvider,
 ): Bot {
   const bot = new Bot(config.telegram.token);
+  const botCommandNames = ["start", "help", "clear", "status", "imagine", "music", "video", "voice", "q", "vision"];
 
   // ── Auth middleware ────────────────────────────────────────
   bot.use(createAuthMiddleware(config));
 
   // ── Rate limit middleware (after auth, before commands) ───
   if (config.rateLimitMs > 0) {
-    bot.use(createRateLimitMiddleware(config.rateLimitMs));
+    bot.use(createRateLimitMiddleware(config.rateLimitMs, botCommandNames));
   }
 
   /** Removes a temp file and its parent tegem- directory. Best-effort, never throws. */
@@ -127,6 +141,32 @@ export function createBot(
     } catch {
       // best-effort
     }
+  }
+
+  async function sendInvisibleTextFallback(
+    ctx: Context,
+    text: string,
+    replyExtra: ReplyExtra,
+    editTarget?: { chatId: number; messageId: number },
+  ): Promise<void> {
+    const notice = describeInvisibleTelegramText(text);
+    if (editTarget) {
+      const edited = await ctx.api
+        .editMessageText(editTarget.chatId, editTarget.messageId, notice)
+        .then(() => true)
+        .catch(() => false);
+      if (!edited) await ctx.reply(notice, replyExtra).catch(() => undefined);
+    } else {
+      await ctx.reply(notice, replyExtra).catch(() => undefined);
+    }
+
+    await ctx.replyWithDocument(
+      new InputFile(Buffer.from(text, "utf8"), "gemini-response.txt"),
+      {
+        caption: "Raw Gemini response",
+        ...replyExtra,
+      },
+    ).catch(() => undefined);
   }
 
   /**
@@ -166,7 +206,7 @@ export function createBot(
     mediaFilePath?: string,
   ): Promise<void> {
     const stopTyping = startTyping(ctx);
-    const replyExtra = replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
+    const replyExtra: ReplyExtra = replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
     const sentMsg = await ctx.reply("…", replyExtra);
 
     const sessionKey = getSessionKey(ctx);
@@ -197,10 +237,11 @@ export function createBot(
 
       while (!next.done) {
         accumulated += next.value as string;
-        if (Date.now() - lastEdit > EDIT_INTERVAL_MS && accumulated.trim()) {
+        const streamingText = sanitizeTelegramDisplayText(accumulated);
+        if (Date.now() - lastEdit > EDIT_INTERVAL_MS && hasVisibleTelegramText(streamingText)) {
           // During streaming, show raw text with cursor (formatting applied only on final)
           await ctx.api
-            .editMessageText(ctx.chat!.id, sentMsg.message_id, accumulated + " ▌")
+            .editMessageText(ctx.chat!.id, sentMsg.message_id, `${streamingText} ▌`)
             .catch(() => undefined);
           lastEdit = Date.now();
         }
@@ -211,13 +252,16 @@ export function createBot(
 
       const finalResponse = next.value as { text: string; images: Array<{ src: string; alt?: string }> };
       const finalText = finalResponse.text || accumulated;
+      const safeFinalText = sanitizeTelegramDisplayText(finalText);
       const images = finalResponse.images ?? [];
 
       if (provider.isQuotaExhausted(finalText)) throw new GeminiQuotaError(finalText);
 
-      if (finalText.trim()) {
+      if (hasVisibleTelegramText(safeFinalText)) {
         // Read the formatted version directly from Gemini's DOM (preserves bold, code, lists)
-        const formatted = await provider.readFormattedAssistantText(page) || formatForTelegram(finalText);
+        const formatted = sanitizeTelegramDisplayText(
+          await provider.readFormattedAssistantText(page) || formatForTelegram(finalText),
+        );
         const chunks = splitMessage(formatted, TELEGRAM_MAX_LEN);
 
         // Edit the placeholder with the first chunk
@@ -226,8 +270,8 @@ export function createBot(
           .catch(async () => {
             // If HTML parse fails, fall back to plain text
             await ctx.api
-              .editMessageText(ctx.chat!.id, sentMsg.message_id, finalText)
-              .catch(async () => ctx.reply(finalText, replyExtra));
+              .editMessageText(ctx.chat!.id, sentMsg.message_id, safeFinalText)
+              .catch(async () => ctx.reply(safeFinalText, replyExtra));
           });
 
         // Send remaining chunks as new messages
@@ -236,19 +280,62 @@ export function createBot(
             ctx.reply(chunks[i], replyExtra), // fallback plain
           );
         }
+      } else if (finalText.length > 0) {
+        await sendInvisibleTextFallback(ctx, finalText, replyExtra, {
+          chatId: ctx.chat!.id,
+          messageId: sentMsg.message_id,
+        });
       } else {
         await ctx.api.deleteMessage(ctx.chat!.id, sentMsg.message_id).catch(() => undefined);
       }
 
       for (const img of images) {
+        const safeAlt = img.alt && hasVisibleTelegramText(img.alt)
+          ? sanitizeTelegramDisplayText(img.alt)
+          : undefined;
         if (img.src.startsWith("data:")) {
           const buf = Buffer.from(img.src.split(",")[1], "base64");
           await ctx.replyWithPhoto(new InputFile(buf, "image.png"), {
-            caption: img.alt || undefined,
+            caption: safeAlt,
             ...replyExtra,
           });
         } else {
-          await ctx.replyWithPhoto(img.src, { caption: img.alt || undefined, ...replyExtra });
+          await ctx.replyWithPhoto(img.src, { caption: safeAlt, ...replyExtra });
+        }
+      }
+
+      if (await provider.hasGeneratedPlayableMedia(page)) {
+        const downloads = await provider.downloadGeneratedMusic(page, 20_000);
+        let sentPlayableMedia = false;
+
+        if (downloads.video) {
+          sentPlayableMedia = true;
+          await ctx.replyWithVideo(
+            new InputFile(downloads.video.buffer, downloads.video.filename),
+            replyExtra,
+          ).catch(() => undefined);
+        }
+
+        if (downloads.audio) {
+          sentPlayableMedia = true;
+          await ctx.replyWithAudio(
+            new InputFile(downloads.audio.buffer, downloads.audio.filename),
+            replyExtra,
+          ).catch(() => undefined);
+        }
+
+        if (!sentPlayableMedia) {
+          const media = await provider.downloadGeneratedMedia(page, 20_000);
+          if (media) {
+            const file = new InputFile(media.buffer, media.filename);
+            if (media.mimeType.startsWith("video/")) {
+              await ctx.replyWithVideo(file, replyExtra).catch(() => undefined);
+            } else if (media.mimeType.startsWith("audio/")) {
+              await ctx.replyWithAudio(file, replyExtra).catch(() => undefined);
+            } else {
+              await ctx.replyWithDocument(file, replyExtra).catch(() => undefined);
+            }
+          }
         }
       }
     } catch (err) {
