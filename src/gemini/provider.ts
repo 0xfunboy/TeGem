@@ -322,129 +322,141 @@ export class GeminiProvider {
       if (topLevel.length === 0) return "";
       const root = topLevel[topLevel.length - 1];
 
-      // ── DOM walker: converts Gemini's rendered HTML to Telegram HTML ──
-      function walk(node: Node): string {
-        if (node.nodeType === Node.TEXT_NODE) {
-          return escapeH(node.textContent ?? "");
-        }
-
-        if (node.nodeType !== Node.ELEMENT_NODE) return "";
-        const el = node as HTMLElement;
-        const tag = el.tagName.toLowerCase();
-
-        // Skip hidden elements
-        if (el.offsetParent === null && tag !== "body" && tag !== "html" && !["code", "span"].includes(tag)) {
-          // Exception: code inside pre is technically hidden but we want it
-          if (!(tag === "code" && el.parentElement?.tagName.toLowerCase() === "pre")) {
-            return "";
-          }
-        }
-
-        const children = () => Array.from(el.childNodes).map(walk).join("");
-
-        switch (tag) {
-          case "b":
-          case "strong":
-            return `<b>${children()}</b>`;
-          case "i":
-          case "em":
-            return `<i>${children()}</i>`;
-          case "u":
-            return `<u>${children()}</u>`;
-          case "s":
-          case "del":
-          case "strike":
-            return `<s>${children()}</s>`;
-          case "code": {
-            // If inside <pre>, preserve as code block
-            const parent = el.parentElement;
-            if (parent && parent.tagName.toLowerCase() === "pre") {
-              // Get language from class if available
-              const langClass = el.className.match(/language-(\w+)/);
-              const langAttr = langClass ? ` class="language-${escapeH(langClass[1])}"` : "";
-              return `<code${langAttr}>${escapeH(el.textContent ?? "")}</code>`;
-            }
-            return `<code>${escapeH(el.textContent ?? "")}</code>`;
-          }
-          case "pre":
-            return `<pre>${children()}</pre>\n`;
-          case "a": {
-            const href = el.getAttribute("href");
-            if (href) return `<a href="${escapeH(href)}">${children()}</a>`;
-            return children();
-          }
-          case "br":
-            return "\n";
-          case "p":
-            return children() + "\n\n";
-          case "div":
-            return children() + "\n";
-          case "h1":
-          case "h2":
-          case "h3":
-          case "h4":
-          case "h5":
-          case "h6":
-            return `<b>${children()}</b>\n\n`;
-          case "li": {
-            const parentTag = el.parentElement?.tagName.toLowerCase();
-            if (parentTag === "ol") {
-              // Numbered list — find index
-              const siblings = Array.from(el.parentElement!.children);
-              const idx = siblings.indexOf(el) + 1;
-              return `${idx}. ${children().trim()}\n`;
-            }
-            return `▸ ${children().trim()}\n`;
-          }
-          case "ul":
-          case "ol":
-            return "\n" + children() + "\n";
-          case "blockquote":
-            return children().trim().split("\n").map((l: string) => `» ${l}`).join("\n") + "\n\n";
-          case "table":
-            return formatTable(el) + "\n\n";
-          case "img":
-            return ""; // skip images (handled separately)
-          case "hr":
-            return "───────────────\n";
-          default:
-            return children();
-        }
-      }
-
-      function escapeH(text: string): string {
+      function esc(text: string): string {
         return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       }
 
-      function formatTable(table: HTMLElement): string {
-        const rows: string[][] = [];
-        table.querySelectorAll("tr").forEach((tr) => {
-          const cells: string[] = [];
-          tr.querySelectorAll("th, td").forEach((cell) => {
-            cells.push((cell.textContent ?? "").trim());
+      // Tags that carry semantic formatting for Telegram
+      const INLINE_FORMAT: Record<string, string> = {
+        b: "b", strong: "b",
+        i: "i", em: "i",
+        u: "u",
+        s: "s", del: "s", strike: "s",
+      };
+
+      function walk(node: Node): string {
+        if (node.nodeType === Node.TEXT_NODE) {
+          return esc(node.textContent ?? "");
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+        const el = node as HTMLElement;
+        const tag = el.tagName.toLowerCase();
+
+        // Skip Gemini UI noise (buttons, action bars, etc.)
+        if (["button", "mat-icon", "script", "style", "svg", "canvas"].includes(tag)) return "";
+        // Skip elements with display:none via inline style
+        const style = el.getAttribute("style") ?? "";
+        if (style.includes("display: none") || style.includes("display:none")) return "";
+
+        const kids = (): string => Array.from(el.childNodes).map(walk).join("");
+
+        // ── Inline formatting ──
+        const tgTag = INLINE_FORMAT[tag];
+        if (tgTag) return `<${tgTag}>${kids()}</${tgTag}>`;
+
+        // ── Code ──
+        if (tag === "code") {
+          const parent = el.parentElement;
+          if (parent && parent.tagName.toLowerCase() === "pre") {
+            // Code block inside <pre> — extract language hint
+            const langMatch = el.className.match(/language-(\w+)/);
+            const langAttr = langMatch ? ` class="language-${esc(langMatch[1])}"` : "";
+            return `<code${langAttr}>${esc(el.textContent ?? "")}</code>`;
+          }
+          return `<code>${esc(el.textContent ?? "")}</code>`;
+        }
+        if (tag === "pre") return `<pre>${kids()}</pre>\n`;
+
+        // ── Links ──
+        if (tag === "a") {
+          const href = el.getAttribute("href");
+          if (href && !href.startsWith("javascript:")) {
+            return `<a href="${esc(href)}">${kids()}</a>`;
+          }
+          return kids();
+        }
+
+        // ── Block elements ──
+        if (tag === "br") return "\n";
+        if (tag === "p") return kids() + "\n\n";
+        if (tag === "h1" || tag === "h2" || tag === "h3" || tag === "h4" || tag === "h5" || tag === "h6") {
+          return `\n<b>${kids()}</b>\n\n`;
+        }
+
+        // ── Lists ──
+        if (tag === "li") {
+          const parentTag = el.parentElement?.tagName.toLowerCase();
+          if (parentTag === "ol") {
+            const idx = Array.from(el.parentElement!.children).indexOf(el) + 1;
+            return `${idx}. ${kids().trim()}\n`;
+          }
+          // Detect nesting depth for sub-bullets
+          let depth = 0;
+          let p = el.parentElement;
+          while (p) {
+            if (p.tagName.toLowerCase() === "ul" || p.tagName.toLowerCase() === "ol") depth++;
+            p = p.parentElement;
+          }
+          const bullet = depth > 1 ? "  ◦" : "▸";
+          return `${bullet} ${kids().trim()}\n`;
+        }
+        if (tag === "ul" || tag === "ol") return "\n" + kids();
+
+        // ── Blockquote ──
+        if (tag === "blockquote") {
+          return kids().trim().split("\n").map((l: string) => `» ${l}`).join("\n") + "\n\n";
+        }
+
+        // ── Tables → monospace ──
+        if (tag === "table") {
+          const rows: string[][] = [];
+          el.querySelectorAll("tr").forEach((tr) => {
+            const cells: string[] = [];
+            tr.querySelectorAll("th, td").forEach((cell) => {
+              cells.push((cell.textContent ?? "").trim());
+            });
+            if (cells.length > 0) rows.push(cells);
           });
-          rows.push(cells);
-        });
-        if (rows.length === 0) return "";
+          if (rows.length === 0) return kids();
+          const colW = rows[0].map((_, ci) =>
+            Math.max(...rows.map((r) => (r[ci] ?? "").length)),
+          );
+          return `<pre>${rows.map((row) =>
+            row.map((c, ci) => esc(c).padEnd(colW[ci] ?? 0)).join(" │ "),
+          ).join("\n")}</pre>\n\n`;
+        }
 
-        // Calculate column widths
-        const colWidths = rows[0].map((_, ci) =>
-          Math.max(...rows.map((r) => (r[ci] ?? "").length)),
-        );
+        // ── Skip images (handled separately) ──
+        if (tag === "img" || tag === "video" || tag === "audio") return "";
 
-        return `<pre>${rows
-          .map((row) =>
-            row.map((cell, ci) => cell.padEnd(colWidths[ci] ?? 0)).join(" │ "),
-          )
-          .join("\n")}</pre>`;
+        // ── Dividers ──
+        if (tag === "hr") return "───────────────\n";
+
+        // ── Generic containers (div, span, etc.) — just recurse ──
+        // Add a newline after div-like blocks to preserve structure
+        const result = kids();
+        if (tag === "div" || tag === "section" || tag === "article") {
+          return result + (result.endsWith("\n") ? "" : "\n");
+        }
+        return result;
       }
 
-      const result = walk(root);
+      let result = walk(root);
 
-      // Clean up excessive whitespace
-      return result
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
+      // Remove Gemini UI noise / disclaimers
+      const noise = [
+        "Gemini isn't human. It can make mistakes, including about people, so double-check it.",
+        "Your privacy &amp; Gemini Apps",
+        "Opens in a new window",
+        "Google may display inaccurate info",
+      ];
+      for (const n of noise) result = result.replace(n, "");
+      result = result.replace(/Gemini Apps Activity[\s\S]*$/i, "");
+      result = result.replace(/Gemini isn.t human\.[\s\S]*?double-check it\.\s*/i, "");
+
+      // Clean up: collapse 3+ newlines, trim
+      return result.replace(/\n{3,}/g, "\n\n").trim();
     }).catch(() => "");
 
     if (html) return html;
