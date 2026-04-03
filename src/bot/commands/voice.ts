@@ -12,26 +12,33 @@ export function makeVoiceHandler(
 ) {
   return async (ctx: CommandContext<Context>): Promise<void> => {
     const sessionKey = getSessionKey(ctx);
-    const page = sessionManager.getPage(sessionKey);
-    if (!page) {
-      await ctx.reply("No active session. Write something first to get a response to read.");
-      return;
-    }
 
-    const stopTyping = startTyping(ctx);
-
-    try {
-      const buf = await provider.downloadLastResponseAudio(page);
-      stopTyping();
-
-      if (buf) {
-        await ctx.replyWithVoice(new InputFile(buf, "voice.mp3"));
-      } else {
-        await ctx.reply("Could not get audio. Make sure there is a recent response.");
+    return sessionManager.withLock(sessionKey, async () => {
+      const page = sessionManager.getPage(sessionKey);
+      if (!page) {
+        await ctx.reply("No active session. Write something first to get a response to read.");
+        return;
       }
-    } catch {
-      stopTyping();
-      await ctx.reply("Error getting audio. Try again shortly.");
-    }
+
+      const stopTyping = startTyping(ctx);
+
+      try {
+        const buf = await provider.downloadLastResponseAudio(page);
+        stopTyping();
+
+        if (buf) {
+          // Detect format: MP3 starts with 0xFF 0xFB/0xF3/0xF2 or ID3, OGG starts with "OggS"
+          const isOgg = buf.length > 4 && buf[0] === 0x4F && buf[1] === 0x67 && buf[2] === 0x67 && buf[3] === 0x53;
+          const ext = isOgg ? "ogg" : "mp3";
+          await ctx.replyWithVoice(new InputFile(buf, `voice.${ext}`));
+        } else {
+          await ctx.reply("Could not capture audio. Make sure there is a recent Gemini response.");
+        }
+      } catch (err) {
+        stopTyping();
+        const msg = err instanceof Error ? err.message : String(err);
+        await ctx.reply(`Error capturing audio: ${msg}`);
+      }
+    });
   };
 }

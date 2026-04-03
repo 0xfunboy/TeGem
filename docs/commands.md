@@ -126,7 +126,13 @@ Important:
 
 ## Access control
 
-If `ALLOWED_USERS` or `ALLOWED_GROUPS` are configured:
+Access is deny-by-default:
 
+- if `ALLOWED_USERS` is empty or unset, all private chat users are rejected
+- if `ALLOWED_GROUPS` is empty or unset, all groups are silently ignored
 - unauthorized private users receive a rejection message
-- unauthorized groups are silently ignored
+- unauthorized groups are silently dropped
+
+## Rate limiting
+
+A per-user cooldown (default 3s) is enforced between requests. Configurable via `RATE_LIMIT_MS` in `.env`. Commands `/start`, `/help`, `/status` are exempt from the cooldown.

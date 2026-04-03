@@ -46,6 +46,12 @@ export interface AppConfig {
   allowedUsers: number[];
   /** Telegram chat IDs of groups where the bot is allowed. Empty = allow all. */
   allowedGroups: number[];
+  /** Minimum cooldown between requests per user, in milliseconds. 0 = no limit. */
+  rateLimitMs: number;
+  /** Max idle time (ms) before a session tab is evicted. 0 = no eviction. */
+  sessionIdleTimeoutMs: number;
+  /** Max concurrent session tabs. 0 = unlimited. */
+  maxSessionTabs: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -105,5 +111,8 @@ Rispondi sempre in modo naturale, utile e conciso. Se l'utente scrive in italian
     systemPrompt,
     allowedUsers: readIdList("ALLOWED_USERS"),
     allowedGroups: readIdList("ALLOWED_GROUPS"),
+    rateLimitMs: readNumber("RATE_LIMIT_MS", 3_000),
+    sessionIdleTimeoutMs: readNumber("SESSION_IDLE_TIMEOUT_MS", 30 * 60_000), // 30 min default
+    maxSessionTabs: readNumber("MAX_SESSION_TABS", 20),
   };
 }

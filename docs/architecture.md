@@ -31,7 +31,8 @@ Key files:
 
 - `src/bot/bot.ts`
 - `src/bot/sessionKey.ts`
-- `src/bot/middleware/auth.ts`
+- `src/bot/middleware/auth.ts` — deny-by-default allowlist
+- `src/bot/middleware/rateLimit.ts` — per-user request cooldown
 - `src/bot/middleware/typing.ts`
 - `src/bot/commands/*.ts`
 
@@ -122,8 +123,22 @@ The browser layer is one persistent Chrome profile:
 
 This design keeps Google login state persistent while allowing many Gemini tabs, one for each Telegram session key.
 
+### Session eviction
+
+The session manager supports idle-based tab eviction:
+
+- tabs unused for `SESSION_IDLE_TIMEOUT_MS` (default 30 min) are automatically closed
+- conversation URL mappings in `sessions.json` are preserved — tabs are restored on next request
+- a hard cap of `MAX_SESSION_TABS` (default 20) evicts LRU tabs when exceeded
+- eviction sweep runs every 60s
+
+This prevents unbounded memory growth while preserving conversation continuity.
+
 ## Current Design Notes
 
 - `SYSTEM_PROMPT` still exists in config, but the current runtime flow does not inject it into Gemini automatically
 - `/music` and `/video` intentionally send generated text separately from Telegram media messages to avoid caption-length failures
 - `/voice` remains best-effort and should still be treated as experimental
+- auth is deny-by-default: empty `ALLOWED_USERS` / `ALLOWED_GROUPS` blocks all access
+- responses >4096 chars are automatically split across multiple Telegram messages
+- `ConversationStore` saves are async and serialized to avoid blocking the event loop
