@@ -7,7 +7,11 @@ import { createBot } from "./bot/bot.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const sessionManager = new GeminiSessionManager(config.gemini);
+  const sessionManager = new GeminiSessionManager(
+    config.gemini,
+    config.sessionIdleTimeoutMs,
+    config.maxSessionTabs,
+  );
   const provider = new GeminiProvider(config.geminiProvider, config.gemini);
 
   console.log("[TeGem] Avvio bot Telegram...");

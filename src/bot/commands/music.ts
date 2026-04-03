@@ -6,6 +6,7 @@ import type { GeminiProvider } from "../../gemini/provider.js";
 import type { AppConfig } from "../../config.js";
 import { getSessionKey, getSessionLabel } from "../sessionKey.js";
 import { startTyping } from "../middleware/typing.js";
+import { formatForTelegram } from "../format.js";
 
 export function makeMusicHandler(
   sessionManager: GeminiSessionManager,
@@ -69,7 +70,9 @@ export function makeMusicHandler(
       }
 
       if (finalText.trim()) {
-        await ctx.reply(finalText, replyExtra);
+        await ctx.reply(formatForTelegram(finalText), { parse_mode: "HTML", ...replyExtra }).catch(async () =>
+          ctx.reply(finalText, replyExtra),
+        );
       } else if (!sentMedia) {
         await ctx.reply("Gemini did not generate music. Try a different description.", replyExtra);
       }

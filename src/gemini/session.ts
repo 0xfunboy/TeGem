@@ -17,6 +17,8 @@ export class GeminiSessionManager {
   private pendingLaunch: Promise<BrowserContext> | null = null;
   /** One Page per session key. */
   private pages: Map<string, Page> = new Map();
+  /** Tracks last activity time per session key for idle eviction. */
+  private lastActivity: Map<string, number> = new Map();
   /** Persistent mapping: sessionKey → conversationId / URL. */
   private store: ConversationStore;
   /**
@@ -25,13 +27,27 @@ export class GeminiSessionManager {
    * interleaved keyboard/DOM operations on the same page.
    */
   private locks: Map<string, Promise<void>> = new Map();
+  /** Eviction interval handle. */
+  private evictionTimer: ReturnType<typeof setInterval> | null = null;
+  /** Idle timeout in ms. 0 = no eviction. */
+  private readonly idleTimeoutMs: number;
+  /** Max concurrent tabs. 0 = unlimited. */
+  private readonly maxTabs: number;
 
-  constructor(private readonly config: GeminiConfig) {
+  constructor(private readonly config: GeminiConfig, idleTimeoutMs = 0, maxTabs = 0) {
     const storeDir = path.join(
       config.baseProfileDir,
       config.profileNamespace,
     );
     this.store = new ConversationStore(storeDir);
+    this.idleTimeoutMs = idleTimeoutMs;
+    this.maxTabs = maxTabs;
+
+    // Start eviction sweep every 60s if idle timeout is configured
+    if (this.idleTimeoutMs > 0) {
+      this.evictionTimer = setInterval(() => this.evictIdleSessions(), 60_000);
+      this.evictionTimer.unref();
+    }
   }
 
   resolveProfilePath(relativeDir: string): string {
@@ -80,9 +96,12 @@ export class GeminiSessionManager {
     this.locks.set(sessionKey, prev.then(() => next));
 
     await prev; // wait for any prior request on this session to finish
+    // Touch activity timestamp — this session is actively being used
+    this.lastActivity.set(sessionKey, Date.now());
     try {
       return await fn();
     } finally {
+      this.lastActivity.set(sessionKey, Date.now());
       releaseLock();
       // Clean up if no more waiters
       if (this.locks.get(sessionKey) === next) this.locks.delete(sessionKey);
@@ -164,11 +183,59 @@ export class GeminiSessionManager {
     return page;
   }
 
+  /**
+   * Evicts idle session tabs. Closes pages that haven't been used for longer
+   * than idleTimeoutMs. The conversation mapping in sessions.json is preserved,
+   * so the session will be restored seamlessly on the next request.
+   * Also enforces maxTabs by evicting least-recently-used sessions.
+   */
+  private evictIdleSessions(): void {
+    const now = Date.now();
+
+    // 1. Evict sessions idle beyond timeout
+    if (this.idleTimeoutMs > 0) {
+      for (const [sessionKey, lastTs] of this.lastActivity) {
+        if (now - lastTs > this.idleTimeoutMs) {
+          const page = this.pages.get(sessionKey);
+          if (page && !page.isClosed()) {
+            console.log(`[Session] Evicting idle tab: ${sessionKey} (idle ${Math.round((now - lastTs) / 1000)}s)`);
+            page.close().catch(() => undefined);
+          }
+          this.pages.delete(sessionKey);
+          this.lastActivity.delete(sessionKey);
+        }
+      }
+    }
+
+    // 2. Enforce max tabs by evicting LRU sessions
+    if (this.maxTabs > 0 && this.pages.size > this.maxTabs) {
+      const sorted = [...this.lastActivity.entries()]
+        .filter(([key]) => this.pages.has(key))
+        .sort((a, b) => a[1] - b[1]); // oldest first
+
+      const toEvict = sorted.slice(0, this.pages.size - this.maxTabs);
+      for (const [sessionKey] of toEvict) {
+        const page = this.pages.get(sessionKey);
+        if (page && !page.isClosed()) {
+          console.log(`[Session] Evicting LRU tab (max tabs ${this.maxTabs}): ${sessionKey}`);
+          page.close().catch(() => undefined);
+        }
+        this.pages.delete(sessionKey);
+        this.lastActivity.delete(sessionKey);
+      }
+    }
+  }
+
   async close(): Promise<void> {
+    if (this.evictionTimer) {
+      clearInterval(this.evictionTimer);
+      this.evictionTimer = null;
+    }
     for (const page of this.pages.values()) {
       await page.close().catch(() => undefined);
     }
     this.pages.clear();
+    this.lastActivity.clear();
     if (this.context) {
       await this.context.close().catch(() => undefined);
       this.context = null;

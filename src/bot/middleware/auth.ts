@@ -10,19 +10,17 @@ export function createAuthMiddleware(config: AppConfig) {
     const chatType = ctx.chat?.type;
 
     if (chatType === "private") {
-      if (config.allowedUsers.length > 0) {
-        const userId = ctx.from?.id;
-        if (!userId || !config.allowedUsers.includes(userId)) {
-          await ctx.reply?.(UNAUTHORIZED_MESSAGE);
-          return;
-        }
+      // Deny-by-default: if no allowlist is configured, reject everyone.
+      // This prevents accidental open access if .env is reset or misconfigured.
+      const userId = ctx.from?.id;
+      if (!userId || config.allowedUsers.length === 0 || !config.allowedUsers.includes(userId)) {
+        await ctx.reply?.(UNAUTHORIZED_MESSAGE);
+        return;
       }
     } else if (chatType === "group" || chatType === "supergroup") {
-      if (config.allowedGroups.length > 0) {
-        const chatId = ctx.chat?.id;
-        if (!chatId || !config.allowedGroups.includes(chatId)) {
-          return;
-        }
+      const chatId = ctx.chat?.id;
+      if (!chatId || config.allowedGroups.length === 0 || !config.allowedGroups.includes(chatId)) {
+        return; // silent drop in groups
       }
     }
 
