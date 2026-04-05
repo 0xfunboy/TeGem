@@ -1,11 +1,11 @@
 # TeGem
 
 <p align="center">
-  <img src="docs/media/TeGem.png" alt="TeGem — Telegram bot powered by Google Gemini via Playwright" width="800"/>
+  <img src="docs/media/TeGem.png" alt="TeGem — Telegram and WhatsApp assistant powered by Google Gemini via Playwright" width="800"/>
 </p>
 
 <p align="center">
-  <strong>Telegram bot powered by Google Gemini via Playwright browser automation.</strong><br/>
+  <strong>Telegram and WhatsApp assistant powered by Google Gemini via Playwright browser automation.</strong><br/>
   Real-time streaming · Per-chat Gemini sessions · Vision, image, music, and video workflows
 </p>
 
@@ -19,24 +19,27 @@
 
 ## Overview
 
-TeGem bridges Telegram and the Gemini web UI by driving `gemini.google.com` directly through Playwright. There is no Gemini API integration: the bot uses a persistent logged-in Chrome profile and automates the Gemini interface.
+TeGem bridges Telegram, WhatsApp, and the Gemini web UI by driving `gemini.google.com` directly through Playwright. There is no Gemini API integration: the bot uses a persistent logged-in Chrome profile and automates the Gemini interface.
 
-The project is built around isolated Gemini conversations per Telegram session key:
+The project is built around isolated Gemini conversations per channel session key:
 
-- private chat: one Gemini conversation per Telegram user
-- group chat: one Gemini conversation per Telegram user per group
+- Telegram private chat: one Gemini conversation per Telegram user
+- Telegram group chat: one Gemini conversation per Telegram user per group
+- WhatsApp private chat: one Gemini conversation per WhatsApp user
+- WhatsApp group chat: one Gemini conversation per WhatsApp user per group
 - persistent restore across restarts through `.playwright/profiles/.../sessions.json`
 
 ## Features
 
 | Feature | Details |
 |---|---|
-| Real-time streaming | Reads Gemini's DOM while the model is generating and edits the Telegram placeholder message progressively |
+| Real-time streaming | Reads Gemini's DOM while the model is generating and edits the channel placeholder message progressively |
+| Multi-channel adapters | Telegram stays intact and WhatsApp runs in parallel with its own adapter and LocalAuth session |
 | Per-session isolation | One Playwright page per session key, with per-session locking to avoid interleaved prompts |
 | Vision / OCR workflows | `/q` works with attached media and replied-to media; `/vision` describes a replied image or attached file |
-| Image generation | `/imagine` captures generated images and forwards them to Telegram |
+| Image generation | `/imagine` captures generated images and forwards them back to the active channel |
 | Music generation | `/music` downloads Gemini's generated video and MP3 outputs, then sends text separately |
-| Video generation | `/video` downloads generated video and sends any text as a normal Telegram message |
+| Video generation | `/video` downloads generated video and sends any text as a normal channel message |
 | Reply threading in groups | If a user tags the bot while replying to someone else, the bot answers under the original replied-to message |
 | Access control | Optional `ALLOWED_USERS` / `ALLOWED_GROUPS` allowlist gating |
 | Persistent login | Chrome profile is stored under `.playwright/` and reused on restart |
@@ -44,34 +47,24 @@ The project is built around isolated Gemini conversations per Telegram session k
 ## Architecture
 
 ```text
-Telegram User
-     │
-     ▼
- grammY Bot
-     │
-     ├── commands (/q, /vision, /imagine, /music, /video, /voice, ...)
-     ├── group mention / reply routing
-     └── auth middleware
-           │
-           ▼
- GeminiSessionManager
-   ├── one BrowserContext (shared profile)
-   ├── one Page per sessionKey
-   ├── per-session mutex
-   └── ConversationStore (sessions.json)
-           │
-           ▼
- GeminiProvider
-   ├── sendPrompt()
-   ├── streamResponse()
-   ├── uploadFile()
-   ├── captureImages()
-   ├── downloadGeneratedMusic()
-   ├── downloadGeneratedMedia()
-   └── downloadLastResponseAudio()
-           │
-           ▼
- gemini.google.com/app
+Telegram Adapter (grammY)        WhatsApp Adapter (whatsapp-web.js)
+          │                                   │
+          ├── commands / mentions             ├── commands / mentions
+          ├── media downloads                 ├── media downloads
+          └── auth / rate limit               └── auth / rate limit
+                              │
+                              ▼
+                    GeminiSessionManager
+                      ├── one BrowserContext (shared profile)
+                      ├── one Page per sessionKey
+                      ├── per-session mutex
+                      └── ConversationStore (sessions.json)
+                              │
+                              ▼
+                        GeminiProvider
+                              │
+                              ▼
+                    gemini.google.com/app
 ```
 
 ## Project Structure
@@ -100,6 +93,9 @@ TeGem/
 │   │   ├── provider.ts
 │   │   ├── session.ts
 │   │   └── types.ts
+│   ├── whatsapp/
+│   │   ├── adapter.ts
+│   │   └── sessionKey.ts
 │   ├── config.ts
 │   └── index.ts
 ├── docs/
@@ -113,7 +109,8 @@ TeGem/
 - Node.js >= 20
 - Google Chrome or Chromium
 - a Google account that can access Gemini
-- a Telegram bot token from `@BotFather`
+- a Telegram bot token from `@BotFather` if Telegram is enabled
+- a WhatsApp account that can link WhatsApp Web if WhatsApp is enabled
 
 ## Setup
 
@@ -141,11 +138,20 @@ Minimum required:
 TELEGRAM_BOT_TOKEN=123456789:AAF...
 ```
 
+WhatsApp-only minimum:
+
+```env
+WHATSAPP_ENABLED=true
+WHATSAPP_ALLOWED_USERS=393331234567
+```
+
 Optional access control:
 
 ```env
 ALLOWED_USERS=123456789,987654321
 ALLOWED_GROUPS=-1001234567890,-1009876543210
+WHATSAPP_ALLOWED_USERS=393331234567,15551234567
+WHATSAPP_ALLOWED_GROUPS=1203630XXXXXXXXX@g.us
 ```
 
 Run in development:
@@ -162,6 +168,8 @@ npm start
 ```
 
 On startup the bot warms the browser context, opens Gemini, and verifies that the logged-in session is usable. The persistent profile is stored under `.playwright/profiles/...`.
+
+If WhatsApp is enabled, TeGem also starts a `whatsapp-web.js` client with `LocalAuth` stored under the same profile namespace. On first run you scan the QR code from the terminal, or use the pairing code flow if `WHATSAPP_PAIR_PHONE_NUMBER` is configured.
 
 ## Bot Commands
 
@@ -183,6 +191,7 @@ Group behavior:
 - plain text in groups is ignored unless the bot is mentioned
 - mention replies inherit the replied-to text as context
 - `/q` and `/vision` can work on media without a bot mention
+- the same slash-command set is available on WhatsApp; Telegram keeps the native bot menu while WhatsApp uses normal messages
 
 ## Configuration Reference
 
@@ -191,6 +200,13 @@ Group behavior:
 | `TELEGRAM_BOT_TOKEN` | — | Required Telegram bot token |
 | `ALLOWED_USERS` | empty | Comma-separated Telegram user IDs allowed in private chat |
 | `ALLOWED_GROUPS` | empty | Comma-separated Telegram group chat IDs where the bot is active |
+| `WHATSAPP_ENABLED` | `false` | Enables the WhatsApp adapter in parallel to Telegram |
+| `WHATSAPP_ALLOWED_USERS` | empty | Comma-separated WhatsApp users allowed in private chat (`3933...` or `3933...@c.us`) |
+| `WHATSAPP_ALLOWED_GROUPS` | empty | Comma-separated WhatsApp group IDs allowed (`...@g.us`) |
+| `WHATSAPP_SESSION_ID` | `tegem` | LocalAuth session identifier for WhatsApp |
+| `WHATSAPP_AUTH_DIR` | `_whatsapp` | Storage directory for WhatsApp auth data under the profile namespace |
+| `WHATSAPP_DEVICE_NAME` | `TeGem` | Device name shown in linked devices |
+| `WHATSAPP_PAIR_PHONE_NUMBER` | empty | Optional phone number for pairing-code auth instead of QR |
 | `PLAYWRIGHT_HEADLESS` | `false` | Run Chrome headless |
 | `PLAYWRIGHT_EXECUTABLE_PATH` | auto | Override Chrome executable path |
 | `PLAYWRIGHT_BROWSER_CHANNEL` | `chrome` | Browser channel if no executable path is given |
@@ -204,9 +220,10 @@ Group behavior:
 
 ## Deployment Notes
 
-- one Chrome profile is shared by every session
+- one Chrome profile is shared by every Gemini session
 - one Playwright page is kept open per active session key
 - sessions are persisted in `.playwright/profiles/<namespace>/sessions.json`
+- WhatsApp LocalAuth data lives alongside the same namespace under `WHATSAPP_AUTH_DIR`
 - on low-memory hosts, long uptime with many users will increase tab usage
 
 For headless servers, Xvfb is still the safest option:
