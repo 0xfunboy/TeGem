@@ -20,6 +20,40 @@ function readIdList(name: string): number[] {
   return value.split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n !== 0);
 }
 
+function readStringList(name: string): string[] {
+  const value = process.env[name];
+  if (!value?.trim()) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizeWhatsappUserId(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) return normalized;
+  if (normalized.endsWith("@c.us")) return normalized;
+  if (normalized.endsWith("@s.whatsapp.net")) {
+    return `${normalized.slice(0, normalized.indexOf("@"))}@c.us`;
+  }
+
+  const digits = normalized.replace(/\D/g, "");
+  return digits ? `${digits}@c.us` : normalized;
+}
+
+function normalizeWhatsappGroupId(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) return normalized;
+  if (normalized.endsWith("@g.us")) return normalized;
+  return `${normalized}@g.us`;
+}
+
+function normalizePhoneNumber(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  const digits = value.replace(/\D/g, "");
+  return digits || undefined;
+}
+
 function resolveDefaultChromePath(): string | undefined {
   const candidates = ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
   return candidates.find((c) => existsSync(c));
@@ -34,7 +68,17 @@ function resolveProfileNamespace(browserChannel?: string, executablePath?: strin
 
 export interface AppConfig {
   telegram: {
-    token: string;
+    enabled: boolean;
+    token?: string;
+  };
+  whatsapp: {
+    enabled: boolean;
+    allowedUsers: string[];
+    allowedGroups: string[];
+    sessionId: string;
+    authDirName: string;
+    pairingPhoneNumber?: string;
+    deviceName: string;
   };
   gemini: GeminiConfig;
   geminiProvider: GeminiProviderConfig;
@@ -57,9 +101,11 @@ export interface AppConfig {
 }
 
 export function loadConfig(): AppConfig {
-  const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!telegramToken) {
-    throw new Error("TELEGRAM_BOT_TOKEN non impostato in .env");
+  const telegramToken = process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined;
+  const whatsappEnabled = readBoolean("WHATSAPP_ENABLED", false);
+
+  if (!telegramToken && !whatsappEnabled) {
+    throw new Error("Configura TELEGRAM_BOT_TOKEN oppure abilita WHATSAPP_ENABLED=true.");
   }
 
   const browserChannel = process.env.PLAYWRIGHT_BROWSER_CHANNEL || undefined;
@@ -92,7 +138,7 @@ export function loadConfig(): AppConfig {
     busySelectors: ["button[aria-label*='Stop']"],
   };
 
-  const systemPrompt = process.env.SYSTEM_PROMPT || `Sei TeGem, un assistente AI avanzato su Telegram, alimentato da Google Gemini.
+  const systemPrompt = process.env.SYSTEM_PROMPT || `Sei TeGem, un assistente AI avanzato su Telegram e WhatsApp, alimentato da Google Gemini.
 Puoi rispondere a domande, generare immagini, aiutare con codice, testi e qualsiasi altra richiesta.
 
 Comandi disponibili del bot:
@@ -106,7 +152,19 @@ Quando l'utente chiede informazioni sui tuoi comandi, spiegali chiaramente.
 Rispondi sempre in modo naturale, utile e conciso. Se l'utente scrive in italiano, rispondi in italiano.`;
 
   return {
-    telegram: { token: telegramToken },
+    telegram: {
+      enabled: Boolean(telegramToken),
+      token: telegramToken,
+    },
+    whatsapp: {
+      enabled: whatsappEnabled,
+      allowedUsers: readStringList("WHATSAPP_ALLOWED_USERS").map(normalizeWhatsappUserId),
+      allowedGroups: readStringList("WHATSAPP_ALLOWED_GROUPS").map(normalizeWhatsappGroupId),
+      sessionId: process.env.WHATSAPP_SESSION_ID?.trim() || "tegem",
+      authDirName: process.env.WHATSAPP_AUTH_DIR?.trim() || "_whatsapp",
+      pairingPhoneNumber: normalizePhoneNumber(process.env.WHATSAPP_PAIR_PHONE_NUMBER),
+      deviceName: process.env.WHATSAPP_DEVICE_NAME?.trim() || "TeGem",
+    },
     gemini: geminiConfig,
     geminiProvider,
     profileDir: process.env.GEMINI_PROFILE_DIR ?? "_shared",

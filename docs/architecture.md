@@ -6,7 +6,7 @@ TeGem is organized around four runtime concerns:
 
 ```text
 ┌──────────────────────────────┐
-│ Telegram Layer               │  grammY routing, commands, auth, reply threading
+│ Channel Adapter Layer        │  Telegram + WhatsApp routing, commands, auth, reply threading
 ├──────────────────────────────┤
 │ Session Routing Layer        │  sessionKey → Playwright Page, mutex, persistence
 ├──────────────────────────────┤
@@ -16,7 +16,9 @@ TeGem is organized around four runtime concerns:
 └──────────────────────────────┘
 ```
 
-## Telegram Layer (`src/bot/`)
+## Channel Adapter Layer
+
+### Telegram Layer (`src/bot/`)
 
 Main responsibilities:
 
@@ -36,6 +38,17 @@ Key files:
 - `src/bot/middleware/typing.ts`
 - `src/bot/commands/*.ts`
 
+### WhatsApp Layer (`src/whatsapp/`)
+
+Main responsibilities:
+
+- `whatsapp-web.js` bootstrap with `LocalAuth`
+- QR / pairing-code login flow
+- private chat and group mention routing mirroring Telegram semantics
+- media download from WhatsApp and upload into Gemini
+- per-user allowlist and per-user cooldown
+- session keys isolated from Telegram via `wa_` prefixes
+
 ### Message routing
 
 - private chat plain text goes straight to Gemini
@@ -54,12 +67,15 @@ Key files:
 
 - private chat: `user_<telegramUserId>`
 - group chat: `group_<chatId>_user_<userId>`
+- WhatsApp private chat: `wa_user_<whatsappUserId>`
+- WhatsApp group chat: `wa_group_<groupId>_user_<userId>`
 
 This means:
 
 - each user has their own Gemini conversation in DM
 - each user has their own Gemini conversation inside each group
 - two users in the same group do not share a Gemini thread
+- Telegram and WhatsApp never collide in `sessions.json`
 
 ### Concurrency model
 

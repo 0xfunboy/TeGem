@@ -1,7 +1,7 @@
 {
   "name": "tegem",
   "version": "0.1.0",
-  "description": "Telegram bot powered by Google Gemini via Playwright automation",
+  "description": "Telegram and WhatsApp assistant powered by Google Gemini via Playwright automation",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -13,7 +13,9 @@
   "dependencies": {
     "dotenv": "^16.4.5",
     "grammy": "^1.30.0",
-    "playwright": "^1.48.0"
+    "playwright": "^1.48.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

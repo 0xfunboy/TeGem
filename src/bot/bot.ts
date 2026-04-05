@@ -115,6 +115,10 @@ export function createBot(
   sessionManager: GeminiSessionManager,
   provider: GeminiProvider,
 ): Bot {
+  if (!config.telegram.token) {
+    throw new Error("TELEGRAM_BOT_TOKEN mancante: impossibile avviare Telegram.");
+  }
+
   const bot = new Bot(config.telegram.token);
   const botCommandNames = ["start", "help", "clear", "status", "imagine", "music", "video", "voice", "q", "vision"];
 

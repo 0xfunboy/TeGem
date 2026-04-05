@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js";
 import { GeminiProvider } from "./gemini/provider.js";
 import { GeminiSessionManager } from "./gemini/session.js";
 import { createBot } from "./bot/bot.js";
+import { createWhatsAppAdapter } from "./whatsapp/adapter.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -15,7 +16,17 @@ async function main(): Promise<void> {
   );
   const provider = new GeminiProvider(config.geminiProvider, config.gemini);
 
-  console.log("[TeGem] Avvio bot Telegram...");
+  if (config.telegram.enabled) {
+    console.log("[TeGem] Telegram abilitato.");
+  } else {
+    console.log("[TeGem] Telegram disabilitato.");
+  }
+
+  if (config.whatsapp.enabled) {
+    console.log("[TeGem] WhatsApp abilitato.");
+  } else {
+    console.log("[TeGem] WhatsApp disabilitato.");
+  }
 
   // Warm up the browser context and verify Gemini login
   console.log("[TeGem] Avvio sessione browser...");
@@ -30,27 +41,37 @@ async function main(): Promise<void> {
     console.warn("[TeGem] Il bot partirà comunque; la sessione verrà aperta al primo messaggio.");
   }
 
-  const bot = createBot(config, sessionManager, provider);
+  const bot = config.telegram.enabled ? createBot(config, sessionManager, provider) : null;
+  const whatsapp = config.whatsapp.enabled
+    ? createWhatsAppAdapter(config, sessionManager, provider)
+    : null;
 
   // Set bot commands for Telegram menu
-  await bot.api.setMyCommands([
-    { command: "start", description: "Welcome message" },
-    { command: "help", description: "Command list" },
-    { command: "clear", description: "New conversation" },
-    { command: "status", description: "Bot status" },
-    { command: "q", description: "Ask a question (also works with photos)" },
-    { command: "vision", description: "Describe a replied image" },
-    { command: "imagine", description: "Generate an image" },
-    { command: "music", description: "Generate music" },
-    { command: "video", description: "Generate a video" },
-    { command: "voice", description: "Read last response (TTS audio)" },
-  ]);
+  if (bot) {
+    await bot.api.setMyCommands([
+      { command: "start", description: "Welcome message" },
+      { command: "help", description: "Command list" },
+      { command: "clear", description: "New conversation" },
+      { command: "status", description: "Bot status" },
+      { command: "q", description: "Ask a question (also works with photos)" },
+      { command: "vision", description: "Describe a replied image" },
+      { command: "imagine", description: "Generate an image" },
+      { command: "music", description: "Generate music" },
+      { command: "video", description: "Generate a video" },
+      { command: "voice", description: "Read last response (TTS audio)" },
+    ]);
+  }
+
+  if (whatsapp) {
+    await whatsapp.start();
+  }
 
   console.log("[TeGem] Bot pronto. In ascolto...");
 
   const shutdown = async (): Promise<void> => {
     console.log("\n[TeGem] Spegnimento...");
-    bot.stop();
+    bot?.stop();
+    await whatsapp?.stop();
     await sessionManager.close();
     process.exit(0);
   };
@@ -58,9 +79,11 @@ async function main(): Promise<void> {
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
-  bot.start({
-    onStart: (info) => console.log(`[TeGem] @${info.username} in ascolto`),
-  });
+  if (bot) {
+    bot.start({
+      onStart: (info) => console.log(`[TeGem] @${info.username} in ascolto`),
+    });
+  }
 }
 
 main().catch((err) => {

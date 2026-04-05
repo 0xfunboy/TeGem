@@ -7,7 +7,8 @@
 | Node.js >= 20 | `node --version` |
 | Chrome or Chromium | system Chrome is auto-detected when possible |
 | Google account | must already be able to use Gemini in the browser |
-| Telegram bot token | create it via `@BotFather` |
+| Telegram bot token | create it via `@BotFather` if Telegram is enabled |
+| WhatsApp account | required if WhatsApp is enabled |
 
 ## 1. Clone and install
 
@@ -29,12 +30,19 @@ npm run playwright:install
 cp .env.example .env
 ```
 
-Minimum (auth is deny-by-default — allowlists are required):
+Minimum Telegram config (auth is deny-by-default — allowlists are required):
 
 ```env
 TELEGRAM_BOT_TOKEN=123456789:AAF...
 ALLOWED_USERS=123456789
 ALLOWED_GROUPS=-1001234567890
+```
+
+Minimum WhatsApp config:
+
+```env
+WHATSAPP_ENABLED=true
+WHATSAPP_ALLOWED_USERS=393331234567
 ```
 
 Useful production toggles:
@@ -57,6 +65,7 @@ Expected startup flow:
 3. you log into Google if needed
 4. `ensureReady()` confirms the chat input is usable
 5. the warmup page closes and real per-session pages are created on demand
+6. if WhatsApp is enabled, a QR code or pairing code is emitted and the linked-device session is restored via `LocalAuth`
 
 You should then see log lines similar to:
 
@@ -76,6 +85,12 @@ Test in DM:
 /status
 ciao
 ```
+
+If WhatsApp is enabled:
+
+- scan the QR printed in the terminal, or use the emitted pairing code
+- send `/start` in a private WhatsApp chat
+- test a group mention with `@<your linked number> ciao`
 
 Test media flows:
 
@@ -153,7 +168,8 @@ pm2 startup
 
 - the Chrome profile is shared, but Gemini pages are separated per session key
 - `sessions.json` stores sessionKey → conversationUrl mappings
+- WhatsApp auth data is stored separately under `.playwright/profiles/<namespace>/<WHATSAPP_AUTH_DIR>/`
 - if you change bot behavior around session identity, old mappings in `sessions.json` may need manual cleanup
 - idle tabs are evicted after `SESSION_IDLE_TIMEOUT_MS` (default 30 min) — conversations are preserved and restored on demand
 - per-user rate limiting (default 3s) is active; adjust `RATE_LIMIT_MS` if needed
-- auth is deny-by-default: if allowlists are empty, no one can use the bot
+- auth is deny-by-default: if the allowlists are empty, no one can use the enabled channel
