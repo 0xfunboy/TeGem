@@ -229,4 +229,4 @@ DISPLAY=:99 PLAYWRIGHT_HEADLESS=false npm start
 
 ## License
 
-MIT
+Existing MIT permissions are preserved. See [LICENSING.md](LICENSING.md) for the terms applying to eligible original material.
